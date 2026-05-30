@@ -75,7 +75,7 @@ pipx install .
 1. Vá para o [Google Cloud Console](https://console.cloud.google.com/) e crie um novo projeto (ou use um existente).
 2. Habilite a **Gmail API** (não confunda com a "Gmail MCP API" — essa é o MCP gerenciado do próprio Google; não é o que queremos).
 3. Configure a **OAuth consent screen**:
-   - User type: **Internal** se a sua conta for parte de um Google Workspace; senão **External** em modo Testing (limite de 100 usuários, tokens expiram a cada 7 dias — funciona pra uso individual).
+   - User type: **Internal** se a sua conta for parte de um Google Workspace (sem expiração de token); senão **External** em modo Testing (até 100 usuários, refresh tokens **expiram a cada 7 dias** — veja [Expiração de token](#expiração-de-token) abaixo).
    - Escopos: adicione `https://www.googleapis.com/auth/gmail.modify` e `https://www.googleapis.com/auth/gmail.settings.basic`. **Nada mais.**
    - Test users (apenas External): adicione o endereço Gmail com o qual você vai autenticar.
 4. Crie um **OAuth Client ID**:
@@ -108,6 +108,31 @@ Isso abre um listener em `localhost:8765` e imprime uma URL de autorização do 
   Aí roda o `mcp-gmail-manager-auth` dentro daquela sessão SSH.
 
 Autorize com a conta Google que vai assinar os emails enviados. Em caso de sucesso, o script grava `token.json` e encerra.
+
+## Expiração de token
+
+A vida útil do refresh token depende de como a OAuth consent screen está configurada:
+
+| Setup | Vida do refresh token | Precisa reautorizar? |
+|---|---|---|
+| **Internal** (Google Workspace) | Sem expiração | Nunca (até o usuário revogar) |
+| **External + Testing** | **7 dias** (política do Google pra apps não-verificados) | **Sim — toda semana** |
+| **External + Production verificado** | Sem expiração | Nunca, mas verificação requer um security assessment pago do Google |
+
+Quando o refresh token expira em modo Testing, você vai ver erros `invalid_grant` ou `Token has been expired or revoked`. Pra recuperar:
+
+```bash
+rm ~/.config/mcp-gmail-manager/token.json
+mcp-gmail-manager-auth
+```
+
+Leva ~30 segundos. Seu `credentials.json` **não é afetado** — só o token do usuário.
+
+### Como evitar a rotação semanal
+
+- **Usuários Workspace**: configure a consent screen como **Internal** ao invés de External. Token nunca expira.
+- **Usuários Gmail pessoal**: re-auth semanal é a única opção prática hoje. Verificação de Production pra `gmail.modify` requer um security assessment do Google (pago, semanas de processo) — inviável pra projetos pessoais.
+- **Configure um lembrete no calendário** ou um cron pra te avisar semanalmente. Uma release futura pode adicionar avisos proativos antes da expiração.
 
 ## Registrar no Claude Code
 
@@ -178,7 +203,7 @@ Referência de schema:
 
 ## Limitações
 
-- A verificação "Production" do OAuth pra `gmail.modify` requer um security assessment do Google (pago, semanas de processo). Fique em "Internal" (Workspace) ou "Testing" (≤ 100 usuários, refresh de 7 dias) pra evitar isso.
+- A verificação "Production" do OAuth pra `gmail.modify` requer um security assessment pago do Google. Fique em "Internal" (Workspace, sem expiração) ou "Testing" (≤ 100 usuários, **rotação de refresh token a cada 7 dias** — veja [Expiração de token](#expiração-de-token)) pra evitar isso.
 - Composição de email com corpo HTML não está exposta como campo de primeira classe. Use `create_draft` + edição manual de HTML no UI do Gmail, ou estenda `_build_mime` num fork.
 - Notificações push (Pub/Sub `watch`/`stop`) não foram implementadas — fora do escopo.
 
