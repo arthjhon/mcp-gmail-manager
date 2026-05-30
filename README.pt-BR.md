@@ -38,16 +38,36 @@ Escopos OAuth solicitados: `gmail.modify` + `gmail.settings.basic`. **Não** sol
 
 ## Instalação
 
+**Recomendado — [pipx](https://pipx.pypa.io/)** (instala num venv isolado e expõe os entry points no `$PATH`):
+
 ```bash
-pip install mcp-gmail-manager
+pipx install mcp-gmail-manager
 ```
 
-Ou direto do código-fonte:
+Se não tiver `pipx`:
+
+```bash
+sudo apt install pipx        # Debian / Ubuntu / Mint
+brew install pipx            # macOS
+pipx ensurepath              # adiciona ~/.local/bin ao PATH; pode precisar reabrir o terminal
+```
+
+**Alternativa — venv manual:**
+
+```bash
+python3 -m venv ~/.venv-mcp-gmail
+~/.venv-mcp-gmail/bin/pip install mcp-gmail-manager
+# Use o caminho absoluto ao registrar no Claude Code (ver abaixo)
+```
+
+**Por que não usar `pip install` global?** Em distros Debian-based modernas falha com `error: externally-managed-environment` ([PEP 668](https://peps.python.org/pep-0668/)) — o SO protege seu Python. Os dois métodos acima são as soluções canônicas.
+
+**Do código-fonte:**
 
 ```bash
 git clone https://github.com/arthjhon/mcp-gmail-manager.git
 cd mcp-gmail-manager
-pip install .
+pipx install .
 ```
 
 ## Setup no Google Cloud (uma vez, ~10 minutos)
@@ -91,14 +111,16 @@ Autorize com a conta Google que vai assinar os emails enviados. Em caso de suces
 
 ## Registrar no Claude Code
 
+Se instalou via `pipx`:
+
 ```bash
 claude mcp add gmail-manager -- mcp-gmail-manager
 ```
 
-Ou, se você instalou num virtualenv que não está no `$PATH`:
+Se instalou num venv manual que não está no `$PATH`:
 
 ```bash
-claude mcp add gmail-manager -- /caminho/para/venv/bin/mcp-gmail-manager
+claude mcp add gmail-manager -- ~/.venv-mcp-gmail/bin/mcp-gmail-manager
 ```
 
 Reinicie a sessão do Claude Code pra que as schemas das ferramentas novas sejam carregadas.
