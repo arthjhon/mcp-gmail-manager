@@ -1,0 +1,14 @@
+{
+  "allowlist": {
+    "enabled": false,
+    "domains": [],
+    "emails": []
+  },
+  "audit_log": {
+    "enabled": true,
+    "path": null
+  },
+  "attachments": {
+    "max_total_bytes": 20971520
+  }
+}

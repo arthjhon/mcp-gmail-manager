@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mcp-gmail-manager"
+version = "0.1.0"
+description = "Gmail Model Context Protocol server with recipient allowlist and local audit log."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Arthur Jhonathas Lima", email = "arthur.jhonathas@umj.edu.br" }]
+keywords = ["mcp", "gmail", "claude", "model-context-protocol", "email", "allowlist", "audit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Email",
+]
+dependencies = [
+    "mcp>=1.0.0",
+    "google-auth>=2.0",
+    "google-auth-oauthlib>=1.0",
+    "google-api-python-client>=2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/arthjhon/mcp-gmail-manager"
+Issues = "https://github.com/arthjhon/mcp-gmail-manager/issues"
+Repository = "https://github.com/arthjhon/mcp-gmail-manager"
+
+[project.scripts]
+mcp-gmail-manager = "mcp_gmail_manager.server:run"
+mcp-gmail-manager-auth = "mcp_gmail_manager.auth:run"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_gmail_manager"]

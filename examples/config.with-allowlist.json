@@ -1,0 +1,14 @@
+{
+  "allowlist": {
+    "enabled": true,
+    "domains": ["your-org.com"],
+    "emails": ["specific.outsider@gmail.com"]
+  },
+  "audit_log": {
+    "enabled": true,
+    "path": null
+  },
+  "attachments": {
+    "max_total_bytes": 20971520
+  }
+}

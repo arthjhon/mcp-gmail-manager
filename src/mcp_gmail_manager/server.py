@@ -1,0 +1,931 @@
+"""MCP server: full Gmail surface (send/reply/forward, drafts, search/read, attachments,
+trash, labels, filters, signature, vacation responder) with optional recipient allowlist
+and local audit log.
+
+Scopes:
+- gmail.modify           : send, drafts, read, labels, modify, trash (not permanent delete)
+- gmail.settings.basic   : filters, signature, vacation responder
+
+Configuration: see `mcp_gmail_manager.config` and the example config file in the repo.
+"""
+from __future__ import annotations
+
+import asyncio
+import base64
+import email.utils
+import json
+import mimetypes
+import os
+import re
+from datetime import datetime, timezone
+from email.message import EmailMessage
+from pathlib import Path
+from typing import Any
+
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+import mcp.server.stdio
+import mcp.types as types
+from mcp.server import NotificationOptions, Server
+from mcp.server.models import InitializationOptions
+
+from . import __version__
+from .config import load_config
+
+# ============================== config & state ==============================
+
+_CFG = load_config()
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
+]
+_EMAIL_RE = re.compile(r"^[^@\s]+@([^@\s]+)$")
+
+_service_cache: Any = None
+_my_email_cache: str | None = None
+
+# ============================== helpers ==============================
+
+def _bare_email(addr_str: str) -> str:
+    _, bare = email.utils.parseaddr(addr_str)
+    return (bare or addr_str).strip()
+
+
+def _check_recipient(addr: str) -> None:
+    if not _CFG.allowlist.enabled:
+        return
+    bare = _bare_email(addr)
+    m = _EMAIL_RE.match(bare)
+    if not m:
+        raise ValueError(f"Endereco invalido: {addr!r}")
+    if bare.lower() in _CFG.allowlist.emails:
+        return
+    if m.group(1).lower() in _CFG.allowlist.domains:
+        return
+    raise PermissionError(
+        f"Destinatario {addr!r} fora da allowlist. "
+        f"Dominios: {sorted(_CFG.allowlist.domains)}; emails: {sorted(_CFG.allowlist.emails)}."
+    )
+
+
+def _check_all_recipients(to=None, cc=None, bcc=None, require_at_least_one=True) -> None:
+    seen = False
+    for group in (to, cc, bcc):
+        for addr in (group or []):
+            _check_recipient(addr)
+            seen = True
+    if require_at_least_one and not seen:
+        raise ValueError("Pelo menos um destinatario eh necessario (to/cc/bcc).")
+
+
+def _gmail_service():
+    global _service_cache
+    if not _CFG.token_path.is_file():
+        raise RuntimeError(
+            f"Token nao encontrado em {_CFG.token_path}. Rode `mcp-gmail-manager-auth` primeiro."
+        )
+    creds = Credentials.from_authorized_user_file(str(_CFG.token_path), SCOPES)
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        _CFG.token_path.write_text(creds.to_json())
+        os.chmod(_CFG.token_path, 0o600)
+        _service_cache = None
+    if _service_cache is None:
+        _service_cache = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    return _service_cache
+
+
+def _my_email() -> str:
+    global _my_email_cache
+    if _my_email_cache is None:
+        profile = _gmail_service().users().getProfile(userId="me").execute()
+        _my_email_cache = (profile.get("emailAddress") or "").lower()
+    return _my_email_cache
+
+
+def _audit_log(op: str, **fields) -> None:
+    if not _CFG.audit.enabled:
+        return
+    _CFG.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = _CFG.audit_log_path
+    entry = {"ts": datetime.now(timezone.utc).isoformat(), "op": op, **fields}
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _attach_files(msg: EmailMessage, attachments: list[dict]) -> list[str]:
+    total = 0
+    names: list[str] = []
+    limit = _CFG.attachments.max_total_bytes
+    for att in attachments:
+        path = Path(att["path"]).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Anexo nao encontrado: {path}")
+        data = path.read_bytes()
+        total += len(data)
+        if total > limit:
+            raise ValueError(f"Anexos excedem {limit // (1024*1024)} MB totais.")
+        mime = att.get("mime_type") or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        maintype, subtype = mime.split("/", 1)
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
+        names.append(path.name)
+    return names
+
+
+def _build_mime(to=None, subject=None, body=None, cc=None, bcc=None, attachments=None,
+                extra_headers: dict | None = None) -> str:
+    msg = EmailMessage()
+    if to:
+        msg["To"] = ", ".join(to)
+    if cc:
+        msg["Cc"] = ", ".join(cc)
+    if bcc:
+        msg["Bcc"] = ", ".join(bcc)
+    if subject:
+        msg["Subject"] = subject
+    if extra_headers:
+        for k, v in extra_headers.items():
+            if v:
+                msg[k] = v
+    msg.set_content(body or "")
+    if attachments:
+        _attach_files(msg, attachments)
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode()
+
+
+def _extract_body(payload):
+    if not payload:
+        return None
+    mime_type = payload.get("mimeType", "")
+    body_data = (payload.get("body") or {}).get("data")
+    if mime_type.startswith("text/") and body_data:
+        return base64.urlsafe_b64decode(body_data).decode("utf-8", errors="replace")
+    for part in (payload.get("parts") or []):
+        found = _extract_body(part)
+        if found:
+            return found
+    return None
+
+
+def _headers_map(payload):
+    return {h["name"]: h["value"] for h in (payload or {}).get("headers", [])}
+
+
+def _split_addrs(value: str) -> list[str]:
+    if not value:
+        return []
+    return [email.utils.formataddr(p) if p[0] else p[1] for p in email.utils.getaddresses([value])]
+
+
+def _json_text(obj) -> list[types.TextContent]:
+    return [types.TextContent(type="text", text=json.dumps(obj, ensure_ascii=False, indent=2))]
+
+
+# ============================== send / reply / forward ==============================
+
+def op_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
+    _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
+    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
+    result = _gmail_service().users().messages().send(userId="me", body={"raw": raw}).execute()
+    msg_id = result.get("id")
+    _audit_log(
+        "send_email",
+        to=to, cc=cc or [], bcc=bcc or [],
+        subject=subject, message_id=msg_id,
+        attachments=[Path(a["path"]).name for a in (attachments or [])],
+    )
+    return {"message_id": msg_id, "thread_id": result.get("threadId")}
+
+
+def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
+    svc = _gmail_service()
+    orig = svc.users().messages().get(
+        userId="me", id=message_id, format="metadata",
+        metadataHeaders=["From", "To", "Cc", "Subject", "Message-ID", "References"],
+    ).execute()
+    headers = _headers_map(orig.get("payload"))
+
+    new_subject = headers.get("Subject", "")
+    if not new_subject.lower().startswith("re:"):
+        new_subject = f"Re: {new_subject}"
+
+    me = _my_email()
+    new_to = [a for a in _split_addrs(headers.get("From", "")) if _bare_email(a).lower() != me]
+    if not new_to:
+        new_to = _split_addrs(headers.get("To", ""))
+
+    new_cc: list[str] = []
+    if reply_all:
+        combined = _split_addrs(headers.get("To", "")) + _split_addrs(headers.get("Cc", ""))
+        new_cc = [a for a in combined if _bare_email(a).lower() not in {me, *(_bare_email(t).lower() for t in new_to)}]
+
+    _check_all_recipients(to=new_to, cc=new_cc, require_at_least_one=True)
+
+    orig_msg_id = headers.get("Message-ID", "")
+    references = " ".join(filter(None, [headers.get("References", ""), orig_msg_id])).strip()
+    raw = _build_mime(
+        to=new_to, cc=new_cc, subject=new_subject, body=body, attachments=attachments,
+        extra_headers={"In-Reply-To": orig_msg_id, "References": references},
+    )
+    result = svc.users().messages().send(
+        userId="me", body={"raw": raw, "threadId": orig.get("threadId")}
+    ).execute()
+    msg_id = result.get("id")
+    _audit_log("reply_to_message", reply_to=message_id, to=new_to, cc=new_cc,
+               subject=new_subject, message_id=msg_id, reply_all=reply_all)
+    return {"message_id": msg_id, "thread_id": result.get("threadId"), "to": new_to, "cc": new_cc}
+
+
+def op_forward_message(message_id, to, body=None, cc=None, bcc=None, attachments=None):
+    _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
+    svc = _gmail_service()
+    orig = svc.users().messages().get(userId="me", id=message_id, format="full").execute()
+    payload = orig.get("payload", {})
+    headers = _headers_map(payload)
+    orig_subject = headers.get("Subject", "")
+    new_subject = orig_subject if orig_subject.lower().startswith(("fwd:", "fw:")) else f"Fwd: {orig_subject}"
+    forwarded_block = (
+        "\n\n---------- Forwarded message ----------\n"
+        f"From: {headers.get('From', '')}\n"
+        f"Date: {headers.get('Date', '')}\n"
+        f"Subject: {headers.get('Subject', '')}\n"
+        f"To: {headers.get('To', '')}\n\n"
+        f"{_extract_body(payload) or '(no body)'}"
+    )
+    full_body = (body or "") + forwarded_block
+    raw = _build_mime(to=to, cc=cc, bcc=bcc, subject=new_subject, body=full_body, attachments=attachments)
+    result = svc.users().messages().send(userId="me", body={"raw": raw}).execute()
+    msg_id = result.get("id")
+    _audit_log("forward_message", forwarded_from=message_id, to=to, cc=cc or [], bcc=bcc or [],
+               subject=new_subject, message_id=msg_id)
+    return {"message_id": msg_id, "thread_id": result.get("threadId")}
+
+
+# ============================== drafts ==============================
+
+def op_create_draft(to=None, subject=None, body=None, cc=None, bcc=None, attachments=None, reply_to_message_id=None):
+    if to or cc or bcc:
+        _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=False)
+    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
+    draft_body: dict = {"message": {"raw": raw}}
+    if reply_to_message_id:
+        orig = _gmail_service().users().messages().get(
+            userId="me", id=reply_to_message_id, format="metadata"
+        ).execute()
+        draft_body["message"]["threadId"] = orig.get("threadId")
+    result = _gmail_service().users().drafts().create(userId="me", body=draft_body).execute()
+    draft_id = result.get("id")
+    _audit_log("create_draft", to=to or [], cc=cc or [], bcc=bcc or [],
+               subject=subject, draft_id=draft_id, reply_to=reply_to_message_id)
+    return {"draft_id": draft_id, "message_id": (result.get("message") or {}).get("id")}
+
+
+def op_list_drafts(query=None, page_size=20, page_token=None):
+    svc = _gmail_service()
+    resp = svc.users().drafts().list(
+        userId="me", q=query, maxResults=min(50, max(1, page_size)), pageToken=page_token
+    ).execute()
+    drafts = []
+    for d in (resp.get("drafts") or []):
+        try:
+            full = svc.users().drafts().get(
+                userId="me", id=d["id"], format="metadata",
+                metadataHeaders=["Subject", "To"],
+            ).execute()
+            msg = full.get("message") or {}
+            headers = _headers_map(msg.get("payload"))
+            drafts.append({
+                "draft_id": d["id"],
+                "message_id": msg.get("id"),
+                "subject": headers.get("Subject"),
+                "to": headers.get("To"),
+                "snippet": msg.get("snippet"),
+            })
+        except HttpError:
+            drafts.append({"draft_id": d["id"]})
+    return {"drafts": drafts, "next_page_token": resp.get("nextPageToken")}
+
+
+def op_send_draft(draft_id):
+    result = _gmail_service().users().drafts().send(userId="me", body={"id": draft_id}).execute()
+    msg_id = result.get("id")
+    _audit_log("send_draft", draft_id=draft_id, message_id=msg_id)
+    return {"message_id": msg_id, "thread_id": result.get("threadId")}
+
+
+def op_update_draft(draft_id, to=None, subject=None, body=None, cc=None, bcc=None, attachments=None):
+    if to or cc or bcc:
+        _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=False)
+    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
+    result = _gmail_service().users().drafts().update(
+        userId="me", id=draft_id, body={"message": {"raw": raw}}
+    ).execute()
+    _audit_log("update_draft", draft_id=draft_id, subject=subject)
+    return {"draft_id": result.get("id"), "message_id": (result.get("message") or {}).get("id")}
+
+
+def op_delete_draft(draft_id):
+    _gmail_service().users().drafts().delete(userId="me", id=draft_id).execute()
+    _audit_log("delete_draft", draft_id=draft_id)
+    return {"deleted": True, "draft_id": draft_id}
+
+
+# ============================== read / profile ==============================
+
+def op_get_profile():
+    profile = _gmail_service().users().getProfile(userId="me").execute()
+    return {
+        "email_address": profile.get("emailAddress"),
+        "messages_total": profile.get("messagesTotal"),
+        "threads_total": profile.get("threadsTotal"),
+        "history_id": profile.get("historyId"),
+    }
+
+
+def op_get_message(message_id, include_body=True):
+    fmt = "full" if include_body else "metadata"
+    m = _gmail_service().users().messages().get(userId="me", id=message_id, format=fmt).execute()
+    payload = m.get("payload", {})
+    headers = _headers_map(payload)
+    out = {
+        "message_id": m.get("id"),
+        "thread_id": m.get("threadId"),
+        "snippet": m.get("snippet"),
+        "from": headers.get("From"),
+        "to": headers.get("To"),
+        "cc": headers.get("Cc"),
+        "subject": headers.get("Subject"),
+        "date": headers.get("Date"),
+        "label_ids": m.get("labelIds", []),
+    }
+    if include_body:
+        out["body"] = _extract_body(payload)
+    return out
+
+
+def op_search_threads(query=None, page_size=20, page_token=None, include_trash=False):
+    svc = _gmail_service()
+    resp = svc.users().threads().list(
+        userId="me", q=query, maxResults=min(50, max(1, page_size)),
+        pageToken=page_token, includeSpamTrash=include_trash,
+    ).execute()
+    threads = [
+        {"thread_id": t.get("id"), "snippet": t.get("snippet"), "history_id": t.get("historyId")}
+        for t in (resp.get("threads") or [])
+    ]
+    return {"threads": threads, "next_page_token": resp.get("nextPageToken")}
+
+
+def op_get_thread(thread_id, include_body=True):
+    svc = _gmail_service()
+    fmt = "full" if include_body else "metadata"
+    t = svc.users().threads().get(userId="me", id=thread_id, format=fmt).execute()
+    messages = []
+    for m in (t.get("messages") or []):
+        payload = m.get("payload", {})
+        headers = _headers_map(payload)
+        item = {
+            "message_id": m.get("id"),
+            "snippet": m.get("snippet"),
+            "from": headers.get("From"),
+            "to": headers.get("To"),
+            "cc": headers.get("Cc"),
+            "subject": headers.get("Subject"),
+            "date": headers.get("Date"),
+            "label_ids": m.get("labelIds", []),
+        }
+        if include_body:
+            item["body"] = _extract_body(payload)
+        messages.append(item)
+    return {"thread_id": thread_id, "messages": messages}
+
+
+# ============================== attachments ==============================
+
+def _walk_attachments(payload, results):
+    if not payload:
+        return
+    body = payload.get("body") or {}
+    filename = payload.get("filename") or ""
+    att_id = body.get("attachmentId")
+    if filename and att_id:
+        results.append({
+            "attachment_id": att_id,
+            "filename": filename,
+            "mime_type": payload.get("mimeType"),
+            "size_bytes": body.get("size", 0),
+        })
+    for part in (payload.get("parts") or []):
+        _walk_attachments(part, results)
+
+
+def op_get_message_attachments(message_id):
+    msg = _gmail_service().users().messages().get(userId="me", id=message_id, format="full").execute()
+    attachments: list[dict] = []
+    _walk_attachments(msg.get("payload"), attachments)
+    return {"message_id": message_id, "attachments": attachments}
+
+
+def op_download_attachment(message_id, attachment_id, save_path):
+    save = Path(save_path).expanduser().resolve()
+    home = Path.home().resolve()
+    if home not in save.parents and save != home:
+        raise PermissionError(f"save_path deve estar dentro de {home}")
+    save.parent.mkdir(parents=True, exist_ok=True)
+    att = _gmail_service().users().messages().attachments().get(
+        userId="me", messageId=message_id, id=attachment_id
+    ).execute()
+    data = base64.urlsafe_b64decode(att.get("data", ""))
+    save.write_bytes(data)
+    _audit_log("download_attachment", message_id=message_id, attachment_id=attachment_id,
+               saved_to=str(save), size_bytes=len(data))
+    return {"saved_to": str(save), "size_bytes": len(data)}
+
+
+# ============================== trash ==============================
+
+def op_trash_message(message_id):
+    _gmail_service().users().messages().trash(userId="me", id=message_id).execute()
+    _audit_log("trash_message", message_id=message_id)
+    return {"trashed": True, "message_id": message_id}
+
+
+def op_untrash_message(message_id):
+    _gmail_service().users().messages().untrash(userId="me", id=message_id).execute()
+    _audit_log("untrash_message", message_id=message_id)
+    return {"untrashed": True, "message_id": message_id}
+
+
+def op_trash_thread(thread_id):
+    _gmail_service().users().threads().trash(userId="me", id=thread_id).execute()
+    _audit_log("trash_thread", thread_id=thread_id)
+    return {"trashed": True, "thread_id": thread_id}
+
+
+def op_untrash_thread(thread_id):
+    _gmail_service().users().threads().untrash(userId="me", id=thread_id).execute()
+    _audit_log("untrash_thread", thread_id=thread_id)
+    return {"untrashed": True, "thread_id": thread_id}
+
+
+# ============================== labels ==============================
+
+def op_list_labels():
+    resp = _gmail_service().users().labels().list(userId="me").execute()
+    return {"labels": [
+        {"id": l["id"], "name": l["name"], "type": l.get("type")}
+        for l in (resp.get("labels") or [])
+    ]}
+
+
+def op_create_label(name, color=None):
+    body: dict = {"name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"}
+    if color:
+        body["color"] = color
+    label = _gmail_service().users().labels().create(userId="me", body=body).execute()
+    _audit_log("create_label", label_id=label.get("id"), name=name)
+    return {"label_id": label.get("id"), "name": label.get("name")}
+
+
+def op_update_label(label_id, name=None, color=None):
+    body: dict = {}
+    if name is not None:
+        body["name"] = name
+    if color is not None:
+        body["color"] = color
+    if not body:
+        raise ValueError("Forneca name ou color para atualizar.")
+    label = _gmail_service().users().labels().patch(userId="me", id=label_id, body=body).execute()
+    _audit_log("update_label", label_id=label_id, fields=list(body.keys()))
+    return {"label_id": label.get("id"), "name": label.get("name")}
+
+
+def op_delete_label(label_id):
+    _gmail_service().users().labels().delete(userId="me", id=label_id).execute()
+    _audit_log("delete_label", label_id=label_id)
+    return {"deleted": True, "label_id": label_id}
+
+
+def op_label_message(message_id, label_ids):
+    _gmail_service().users().messages().modify(
+        userId="me", id=message_id, body={"addLabelIds": label_ids}
+    ).execute()
+    _audit_log("label_message", message_id=message_id, add=label_ids)
+    return {"message_id": message_id, "added_labels": label_ids}
+
+
+def op_unlabel_message(message_id, label_ids):
+    _gmail_service().users().messages().modify(
+        userId="me", id=message_id, body={"removeLabelIds": label_ids}
+    ).execute()
+    _audit_log("unlabel_message", message_id=message_id, remove=label_ids)
+    return {"message_id": message_id, "removed_labels": label_ids}
+
+
+def op_label_thread(thread_id, label_ids):
+    _gmail_service().users().threads().modify(
+        userId="me", id=thread_id, body={"addLabelIds": label_ids}
+    ).execute()
+    _audit_log("label_thread", thread_id=thread_id, add=label_ids)
+    return {"thread_id": thread_id, "added_labels": label_ids}
+
+
+def op_unlabel_thread(thread_id, label_ids):
+    _gmail_service().users().threads().modify(
+        userId="me", id=thread_id, body={"removeLabelIds": label_ids}
+    ).execute()
+    _audit_log("unlabel_thread", thread_id=thread_id, remove=label_ids)
+    return {"thread_id": thread_id, "removed_labels": label_ids}
+
+
+# ============================== settings: filters / signature / vacation ==============================
+
+def op_list_filters():
+    resp = _gmail_service().users().settings().filters().list(userId="me").execute()
+    return {"filters": resp.get("filter", [])}
+
+
+def op_create_filter(criteria, action):
+    if not isinstance(criteria, dict) or not isinstance(action, dict):
+        raise ValueError("criteria e action devem ser objetos.")
+    body = {"criteria": criteria, "action": action}
+    result = _gmail_service().users().settings().filters().create(userId="me", body=body).execute()
+    _audit_log("create_filter", filter_id=result.get("id"), criteria=criteria, action=action)
+    return {"filter_id": result.get("id"), "criteria": criteria, "action": action}
+
+
+def op_delete_filter(filter_id):
+    _gmail_service().users().settings().filters().delete(userId="me", id=filter_id).execute()
+    _audit_log("delete_filter", filter_id=filter_id)
+    return {"deleted": True, "filter_id": filter_id}
+
+
+def op_get_signature(send_as_email=None):
+    target = (send_as_email or _my_email())
+    sa = _gmail_service().users().settings().sendAs().get(userId="me", sendAsEmail=target).execute()
+    return {"send_as_email": target, "signature": sa.get("signature", "")}
+
+
+def op_update_signature(signature_html, send_as_email=None):
+    target = (send_as_email or _my_email())
+    sa = _gmail_service().users().settings().sendAs().patch(
+        userId="me", sendAsEmail=target, body={"signature": signature_html}
+    ).execute()
+    _audit_log("update_signature", send_as_email=target)
+    return {"send_as_email": target, "signature": sa.get("signature", "")}
+
+
+def op_get_vacation_responder():
+    return _gmail_service().users().settings().getVacation(userId="me").execute()
+
+
+def op_set_vacation_responder(enabled, subject=None, body_text=None, body_html=None,
+                              restrict_to_contacts=False, restrict_to_domain=False,
+                              start_time_millis=None, end_time_millis=None):
+    body: dict = {"enableAutoReply": bool(enabled)}
+    if subject is not None:
+        body["responseSubject"] = subject
+    if body_text is not None:
+        body["responseBodyPlainText"] = body_text
+    if body_html is not None:
+        body["responseBodyHtml"] = body_html
+    body["restrictToContacts"] = bool(restrict_to_contacts)
+    body["restrictToDomain"] = bool(restrict_to_domain)
+    if start_time_millis is not None:
+        body["startTime"] = str(start_time_millis)
+    if end_time_millis is not None:
+        body["endTime"] = str(end_time_millis)
+    result = _gmail_service().users().settings().updateVacation(userId="me", body=body).execute()
+    _audit_log("set_vacation_responder", enabled=enabled, subject=subject)
+    return result
+
+
+# ============================== MCP wiring ==============================
+
+app = Server("mcp-gmail-manager")
+
+
+_ATT_SCHEMA = {
+    "type": "object",
+    "required": ["path"],
+    "properties": {
+        "path": {"type": "string", "description": "Absolute path on the server filesystem."},
+        "mime_type": {"type": "string"},
+    },
+}
+
+_COLOR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "textColor": {"type": "string"},
+        "backgroundColor": {"type": "string"},
+    },
+}
+
+
+@app.list_tools()
+async def list_tools() -> list[types.Tool]:
+    addr_array = {"type": "array", "items": {"type": "string"}}
+    return [
+        types.Tool(name="send_email",
+            description="Send an email immediately. Recipient allowlist enforced if enabled in config.",
+            inputSchema={
+                "type": "object", "required": ["to", "subject", "body"],
+                "properties": {
+                    "to": addr_array, "subject": {"type": "string"}, "body": {"type": "string"},
+                    "cc": addr_array, "bcc": addr_array,
+                    "attachments": {"type": "array", "items": _ATT_SCHEMA},
+                }}),
+        types.Tool(name="reply_to_message",
+            description="Reply to a message. Auto-fills To (and Cc if reply_all) from the original; preserves threading.",
+            inputSchema={
+                "type": "object", "required": ["message_id", "body"],
+                "properties": {
+                    "message_id": {"type": "string"}, "body": {"type": "string"},
+                    "attachments": {"type": "array", "items": _ATT_SCHEMA},
+                    "reply_all": {"type": "boolean", "default": False},
+                }}),
+        types.Tool(name="forward_message",
+            description="Forward a message to new recipients with quoted original.",
+            inputSchema={
+                "type": "object", "required": ["message_id", "to"],
+                "properties": {
+                    "message_id": {"type": "string"}, "to": addr_array,
+                    "body": {"type": "string"}, "cc": addr_array, "bcc": addr_array,
+                    "attachments": {"type": "array", "items": _ATT_SCHEMA},
+                }}),
+        types.Tool(name="create_draft",
+            description="Create a Gmail draft. Allowlist enforced on explicit recipients.",
+            inputSchema={
+                "type": "object", "required": ["subject", "body"],
+                "properties": {
+                    "to": addr_array, "subject": {"type": "string"}, "body": {"type": "string"},
+                    "cc": addr_array, "bcc": addr_array,
+                    "attachments": {"type": "array", "items": _ATT_SCHEMA},
+                    "reply_to_message_id": {"type": "string"},
+                }}),
+        types.Tool(name="list_drafts",
+            description="List Gmail drafts (Gmail search query + pagination).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "page_size": {"type": "integer", "default": 20, "maximum": 50, "minimum": 1},
+                    "page_token": {"type": "string"},
+                }}),
+        types.Tool(name="send_draft",
+            description="Send an existing draft by ID.",
+            inputSchema={"type": "object", "required": ["draft_id"],
+                "properties": {"draft_id": {"type": "string"}}}),
+        types.Tool(name="update_draft",
+            description="Replace the contents of an existing draft.",
+            inputSchema={
+                "type": "object", "required": ["draft_id"],
+                "properties": {
+                    "draft_id": {"type": "string"},
+                    "to": addr_array, "subject": {"type": "string"}, "body": {"type": "string"},
+                    "cc": addr_array, "bcc": addr_array,
+                    "attachments": {"type": "array", "items": _ATT_SCHEMA},
+                }}),
+        types.Tool(name="delete_draft",
+            description="Delete a draft by ID.",
+            inputSchema={"type": "object", "required": ["draft_id"],
+                "properties": {"draft_id": {"type": "string"}}}),
+        types.Tool(name="get_profile",
+            description="Return the authenticated Gmail account info.",
+            inputSchema={"type": "object", "properties": {}}),
+        types.Tool(name="get_message",
+            description="Fetch a single message by ID.",
+            inputSchema={
+                "type": "object", "required": ["message_id"],
+                "properties": {
+                    "message_id": {"type": "string"},
+                    "include_body": {"type": "boolean", "default": True},
+                }}),
+        types.Tool(name="search_threads",
+            description="Search Gmail threads using Gmail search operators.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "page_size": {"type": "integer", "default": 20, "maximum": 50, "minimum": 1},
+                    "page_token": {"type": "string"},
+                    "include_trash": {"type": "boolean", "default": False},
+                }}),
+        types.Tool(name="get_thread",
+            description="Fetch a thread by ID.",
+            inputSchema={
+                "type": "object", "required": ["thread_id"],
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "include_body": {"type": "boolean", "default": True},
+                }}),
+        types.Tool(name="get_message_attachments",
+            description="List attachments in a message.",
+            inputSchema={"type": "object", "required": ["message_id"],
+                "properties": {"message_id": {"type": "string"}}}),
+        types.Tool(name="download_attachment",
+            description="Download an attachment to disk (must be inside $HOME).",
+            inputSchema={
+                "type": "object", "required": ["message_id", "attachment_id", "save_path"],
+                "properties": {
+                    "message_id": {"type": "string"}, "attachment_id": {"type": "string"},
+                    "save_path": {"type": "string"},
+                }}),
+        types.Tool(name="trash_message",
+            description="Move a message to Trash.",
+            inputSchema={"type": "object", "required": ["message_id"],
+                "properties": {"message_id": {"type": "string"}}}),
+        types.Tool(name="untrash_message",
+            description="Restore a message from Trash.",
+            inputSchema={"type": "object", "required": ["message_id"],
+                "properties": {"message_id": {"type": "string"}}}),
+        types.Tool(name="trash_thread",
+            description="Move a thread to Trash.",
+            inputSchema={"type": "object", "required": ["thread_id"],
+                "properties": {"thread_id": {"type": "string"}}}),
+        types.Tool(name="untrash_thread",
+            description="Restore a thread from Trash.",
+            inputSchema={"type": "object", "required": ["thread_id"],
+                "properties": {"thread_id": {"type": "string"}}}),
+        types.Tool(name="list_labels",
+            description="List all Gmail labels.",
+            inputSchema={"type": "object", "properties": {}}),
+        types.Tool(name="create_label",
+            description="Create a new user-defined label.",
+            inputSchema={"type": "object", "required": ["name"],
+                "properties": {"name": {"type": "string"}, "color": _COLOR_SCHEMA}}),
+        types.Tool(name="update_label",
+            description="Update an existing label.",
+            inputSchema={
+                "type": "object", "required": ["label_id"],
+                "properties": {
+                    "label_id": {"type": "string"}, "name": {"type": "string"},
+                    "color": _COLOR_SCHEMA,
+                }}),
+        types.Tool(name="delete_label",
+            description="Delete a label by ID.",
+            inputSchema={"type": "object", "required": ["label_id"],
+                "properties": {"label_id": {"type": "string"}}}),
+        types.Tool(name="label_message",
+            description="Add labels to a message.",
+            inputSchema={
+                "type": "object", "required": ["message_id", "label_ids"],
+                "properties": {
+                    "message_id": {"type": "string"},
+                    "label_ids": {"type": "array", "items": {"type": "string"}},
+                }}),
+        types.Tool(name="unlabel_message",
+            description="Remove labels from a message.",
+            inputSchema={
+                "type": "object", "required": ["message_id", "label_ids"],
+                "properties": {
+                    "message_id": {"type": "string"},
+                    "label_ids": {"type": "array", "items": {"type": "string"}},
+                }}),
+        types.Tool(name="label_thread",
+            description="Add labels to a thread.",
+            inputSchema={
+                "type": "object", "required": ["thread_id", "label_ids"],
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "label_ids": {"type": "array", "items": {"type": "string"}},
+                }}),
+        types.Tool(name="unlabel_thread",
+            description="Remove labels from a thread.",
+            inputSchema={
+                "type": "object", "required": ["thread_id", "label_ids"],
+                "properties": {
+                    "thread_id": {"type": "string"},
+                    "label_ids": {"type": "array", "items": {"type": "string"}},
+                }}),
+        types.Tool(name="list_filters",
+            description="List all Gmail filters.",
+            inputSchema={"type": "object", "properties": {}}),
+        types.Tool(name="create_filter",
+            description="Create a Gmail filter. criteria/action per Gmail API schema.",
+            inputSchema={
+                "type": "object", "required": ["criteria", "action"],
+                "properties": {
+                    "criteria": {"type": "object"}, "action": {"type": "object"},
+                }}),
+        types.Tool(name="delete_filter",
+            description="Delete a Gmail filter by ID.",
+            inputSchema={"type": "object", "required": ["filter_id"],
+                "properties": {"filter_id": {"type": "string"}}}),
+        types.Tool(name="get_signature",
+            description="Get the HTML signature for a sendAs identity.",
+            inputSchema={"type": "object",
+                "properties": {"send_as_email": {"type": "string"}}}),
+        types.Tool(name="update_signature",
+            description="Update the HTML signature.",
+            inputSchema={
+                "type": "object", "required": ["signature_html"],
+                "properties": {
+                    "signature_html": {"type": "string"},
+                    "send_as_email": {"type": "string"},
+                }}),
+        types.Tool(name="get_vacation_responder",
+            description="Get the vacation responder configuration.",
+            inputSchema={"type": "object", "properties": {}}),
+        types.Tool(name="set_vacation_responder",
+            description="Enable or disable the vacation responder.",
+            inputSchema={
+                "type": "object", "required": ["enabled"],
+                "properties": {
+                    "enabled": {"type": "boolean"},
+                    "subject": {"type": "string"},
+                    "body_text": {"type": "string"},
+                    "body_html": {"type": "string"},
+                    "restrict_to_contacts": {"type": "boolean", "default": False},
+                    "restrict_to_domain": {"type": "boolean", "default": False},
+                    "start_time_millis": {"type": "integer"},
+                    "end_time_millis": {"type": "integer"},
+                }}),
+    ]
+
+
+_DISPATCH = {
+    "send_email":              lambda a: op_send_email(a["to"], a["subject"], a["body"], a.get("cc"), a.get("bcc"), a.get("attachments")),
+    "reply_to_message":        lambda a: op_reply_to_message(a["message_id"], a["body"], a.get("attachments"), a.get("reply_all", False)),
+    "forward_message":         lambda a: op_forward_message(a["message_id"], a["to"], a.get("body"), a.get("cc"), a.get("bcc"), a.get("attachments")),
+    "create_draft":            lambda a: op_create_draft(a.get("to"), a["subject"], a["body"], a.get("cc"), a.get("bcc"), a.get("attachments"), a.get("reply_to_message_id")),
+    "list_drafts":             lambda a: op_list_drafts(a.get("query"), a.get("page_size", 20), a.get("page_token")),
+    "send_draft":              lambda a: op_send_draft(a["draft_id"]),
+    "update_draft":            lambda a: op_update_draft(a["draft_id"], a.get("to"), a.get("subject"), a.get("body"), a.get("cc"), a.get("bcc"), a.get("attachments")),
+    "delete_draft":            lambda a: op_delete_draft(a["draft_id"]),
+    "get_profile":             lambda a: op_get_profile(),
+    "get_message":             lambda a: op_get_message(a["message_id"], a.get("include_body", True)),
+    "search_threads":          lambda a: op_search_threads(a.get("query"), a.get("page_size", 20), a.get("page_token"), a.get("include_trash", False)),
+    "get_thread":              lambda a: op_get_thread(a["thread_id"], a.get("include_body", True)),
+    "get_message_attachments": lambda a: op_get_message_attachments(a["message_id"]),
+    "download_attachment":     lambda a: op_download_attachment(a["message_id"], a["attachment_id"], a["save_path"]),
+    "trash_message":           lambda a: op_trash_message(a["message_id"]),
+    "untrash_message":         lambda a: op_untrash_message(a["message_id"]),
+    "trash_thread":            lambda a: op_trash_thread(a["thread_id"]),
+    "untrash_thread":          lambda a: op_untrash_thread(a["thread_id"]),
+    "list_labels":             lambda a: op_list_labels(),
+    "create_label":            lambda a: op_create_label(a["name"], a.get("color")),
+    "update_label":            lambda a: op_update_label(a["label_id"], a.get("name"), a.get("color")),
+    "delete_label":            lambda a: op_delete_label(a["label_id"]),
+    "label_message":           lambda a: op_label_message(a["message_id"], a["label_ids"]),
+    "unlabel_message":         lambda a: op_unlabel_message(a["message_id"], a["label_ids"]),
+    "label_thread":            lambda a: op_label_thread(a["thread_id"], a["label_ids"]),
+    "unlabel_thread":          lambda a: op_unlabel_thread(a["thread_id"], a["label_ids"]),
+    "list_filters":            lambda a: op_list_filters(),
+    "create_filter":           lambda a: op_create_filter(a["criteria"], a["action"]),
+    "delete_filter":           lambda a: op_delete_filter(a["filter_id"]),
+    "get_signature":           lambda a: op_get_signature(a.get("send_as_email")),
+    "update_signature":        lambda a: op_update_signature(a["signature_html"], a.get("send_as_email")),
+    "get_vacation_responder":  lambda a: op_get_vacation_responder(),
+    "set_vacation_responder":  lambda a: op_set_vacation_responder(
+        a["enabled"], a.get("subject"), a.get("body_text"), a.get("body_html"),
+        a.get("restrict_to_contacts", False), a.get("restrict_to_domain", False),
+        a.get("start_time_millis"), a.get("end_time_millis"),
+    ),
+}
+
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict):
+    handler = _DISPATCH.get(name)
+    if handler is None:
+        raise ValueError(f"Unknown tool: {name}")
+    try:
+        result = handler(arguments)
+    except HttpError as e:
+        status = getattr(getattr(e, "resp", None), "status", "?")
+        return [types.TextContent(type="text", text=f"Gmail API error (status={status}): {e}")]
+    return _json_text(result)
+
+
+async def main():
+    async with mcp.server.stdio.stdio_server() as (read, write):
+        await app.run(
+            read,
+            write,
+            InitializationOptions(
+                server_name="mcp-gmail-manager",
+                server_version=__version__,
+                capabilities=app.get_capabilities(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities={},
+                ),
+            ),
+        )
+
+
+def run() -> None:
+    """Entry point for the `mcp-gmail-manager` script."""
+    asyncio.run(main())
+
+
+if __name__ == "__main__":
+    run()
