@@ -2,6 +2,11 @@
 
 > 🌐 **[Leia em português (pt-BR) →](README.pt-BR.md)**
 
+[![PyPI version](https://img.shields.io/pypi/v/mcp-gmail-manager.svg)](https://pypi.org/project/mcp-gmail-manager/)
+[![Python versions](https://img.shields.io/pypi/pyversions/mcp-gmail-manager.svg)](https://pypi.org/project/mcp-gmail-manager/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
+[![MCP Compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
+
 A comprehensive Gmail [Model Context Protocol](https://modelcontextprotocol.io) server: **33 tools** covering send, reply, forward, drafts, search, read, attachments, trash, labels, filters, signature, and vacation responder.
 
 Two optional features that distinguish it from other Gmail MCPs:
