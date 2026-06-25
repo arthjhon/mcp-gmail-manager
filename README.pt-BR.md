@@ -150,6 +150,59 @@ claude mcp add gmail-manager -- ~/.venv-mcp-gmail/bin/mcp-gmail-manager
 
 Reinicie a sessão do Claude Code pra que as schemas das ferramentas novas sejam carregadas.
 
+## Múltiplas contas Gmail
+
+Cada instância do MCP gerencia **uma** conta Gmail. Pra usar várias contas na mesma sessão do Claude Code (ex.: pessoal + trabalho), registre o MCP **uma vez por conta** com um `GMAIL_MCP_CONFIG_DIR` distinto. Cada instância tem credentials, token, audit log e config próprios — totalmente isolados.
+
+### Setup por conta
+
+```bash
+# 1. Diretório de config dedicado
+mkdir -p ~/.config/mcp-gmail-<nome> && chmod 700 ~/.config/mcp-gmail-<nome>
+
+# 2. Reusa o mesmo OAuth client (um credentials.json serve pra qualquer usuário do mesmo projeto GCP)
+cp ~/.config/mcp-gmail-<outra>/credentials.json ~/.config/mcp-gmail-<nome>/
+chmod 600 ~/.config/mcp-gmail-<nome>/credentials.json
+
+# 3. Autentica com a conta Gmail alvo
+GMAIL_MCP_CONFIG_DIR=$HOME/.config/mcp-gmail-<nome> mcp-gmail-manager-auth
+
+# 4. Registra com a sobrescrita de env
+claude mcp add gmail-<nome> -s user \
+  -e GMAIL_MCP_CONFIG_DIR=$HOME/.config/mcp-gmail-<nome> \
+  -- mcp-gmail-manager
+```
+
+Reinicia o Claude Code. As ferramentas aparecem sob namespaces separados:
+
+- `mcp__gmail-pessoal__send_email` → envia da conta pessoal
+- `mcp__gmail-trabalho__send_email` → envia da conta de trabalho
+
+Você pode pedir ao Claude "envia pelo gmail-trabalho" e ele pega o namespace certo.
+
+### Configuração por conta
+
+Cada `<config_dir>/config.json` é independente. Padrões úteis:
+
+```json
+// ~/.config/mcp-gmail-trabalho/config.json — allowlist estrita
+{
+  "allowlist": {
+    "enabled": true,
+    "domains": ["suaempresa.com"]
+  }
+}
+```
+
+```json
+// ~/.config/mcp-gmail-pessoal/config.json — silencia o audit log
+{
+  "audit_log": { "enabled": false }
+}
+```
+
+Comprometimento do token de uma conta não vaza a outra — cada uma vive em pasta separada com `chmod 600`.
+
 ## Configuração
 
 `~/.config/mcp-gmail-manager/config.json` é opcional — se não existir, valores padrão razoáveis são aplicados (sem allowlist, audit log ligado). Dois exemplos prontos pra copiar estão incluídos:

@@ -150,6 +150,59 @@ claude mcp add gmail-manager -- ~/.venv-mcp-gmail/bin/mcp-gmail-manager
 
 Restart your Claude Code session so the new tool schemas load.
 
+## Multiple Gmail accounts
+
+Each MCP instance handles **one** Gmail account. To use several accounts from the same Claude Code session (e.g. personal + work), register the MCP **once per account** with a distinct `GMAIL_MCP_CONFIG_DIR`. Each instance gets its own credentials, token, audit log, and config — fully isolated.
+
+### Setup per account
+
+```bash
+# 1. Dedicated config directory
+mkdir -p ~/.config/mcp-gmail-<name> && chmod 700 ~/.config/mcp-gmail-<name>
+
+# 2. Reuse the same OAuth client (one credentials.json works for any user in the same GCP project)
+cp ~/.config/mcp-gmail-<other>/credentials.json ~/.config/mcp-gmail-<name>/
+chmod 600 ~/.config/mcp-gmail-<name>/credentials.json
+
+# 3. Authenticate with the target Gmail account
+GMAIL_MCP_CONFIG_DIR=$HOME/.config/mcp-gmail-<name> mcp-gmail-manager-auth
+
+# 4. Register with the env override
+claude mcp add gmail-<name> -s user \
+  -e GMAIL_MCP_CONFIG_DIR=$HOME/.config/mcp-gmail-<name> \
+  -- mcp-gmail-manager
+```
+
+Restart Claude Code. The tools appear under separate namespaces:
+
+- `mcp__gmail-personal__send_email` → sends from the personal account
+- `mcp__gmail-work__send_email` → sends from the work account
+
+You can prompt Claude with "send via gmail-work" and it picks the right namespace.
+
+### Per-account configuration
+
+Each `<config_dir>/config.json` is independent. Useful patterns:
+
+```json
+// ~/.config/mcp-gmail-work/config.json — strict allowlist
+{
+  "allowlist": {
+    "enabled": true,
+    "domains": ["yourcompany.com"]
+  }
+}
+```
+
+```json
+// ~/.config/mcp-gmail-personal/config.json — silence the audit log
+{
+  "audit_log": { "enabled": false }
+}
+```
+
+Compromise of one account's token does not leak the other — each lives in a separate directory with `chmod 600`.
+
 ## Configuration
 
 `~/.config/mcp-gmail-manager/config.json` is optional — if it doesn't exist, sensible defaults apply (no allowlist, audit log enabled). Two ready-to-copy examples are provided:
