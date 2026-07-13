@@ -57,6 +57,9 @@ class AuditConfig:
     enabled: bool = True
     include_reads: bool = False
     path: str | None = None  # None = derived from config_dir / audit.jsonl
+    max_size_bytes: int = 10 * 1024 * 1024  # 10 MB before rotate
+    max_backups: int = 5  # keep audit.jsonl.1 .. audit.jsonl.N
+    verify_on_startup: bool = False  # walk the chain on server start
 
 
 @dataclass
@@ -72,11 +75,18 @@ class AttachmentConfig:
 
 
 @dataclass
+class RateLimitConfig:
+    enabled: bool = False
+    sends_per_hour: int = 60  # only used when enabled
+
+
+@dataclass
 class Config:
     config_dir: Path = field(default_factory=_default_config_dir)
     allowlist: AllowlistConfig = field(default_factory=AllowlistConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
     attachments: AttachmentConfig = field(default_factory=AttachmentConfig)
+    rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
 
     @property
     def credentials_path(self) -> Path:
@@ -123,6 +133,9 @@ def load_config() -> Config:
             enabled=bool(au.get("enabled", True)),
             include_reads=bool(au.get("include_reads", False)),
             path=au.get("path"),
+            max_size_bytes=int(au.get("max_size_bytes", AuditConfig.max_size_bytes)),
+            max_backups=int(au.get("max_backups", AuditConfig.max_backups)),
+            verify_on_startup=bool(au.get("verify_on_startup", False)),
         )
     if isinstance(data.get("attachments"), dict):
         at = data["attachments"]
@@ -131,5 +144,11 @@ def load_config() -> Config:
             allowed_paths=[str(p) for p in (at.get("allowed_paths") or [])],
             deny_patterns=[str(p) for p in (at.get("deny_patterns") or [])],
             use_default_deny_patterns=bool(at.get("use_default_deny_patterns", True)),
+        )
+    if isinstance(data.get("rate_limit"), dict):
+        rl = data["rate_limit"]
+        cfg.rate_limit = RateLimitConfig(
+            enabled=bool(rl.get("enabled", False)),
+            sends_per_hour=int(rl.get("sends_per_hour", RateLimitConfig.sends_per_hour)),
         )
     return cfg

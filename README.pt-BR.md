@@ -246,10 +246,26 @@ Referência de schema:
 | `audit_log.enabled` | `true` | Anexa toda escrita/envio/modificação no JSONL. |
 | `audit_log.include_reads` | `false` | Também loga operações de leitura (`get_message`, `search_threads`, etc.). Útil pra detectar reconhecimento silencioso. |
 | `audit_log.path` | `null` | `null` → `<config_dir>/audit.jsonl`. Sobrescreva pra centralizar logs. |
+| `audit_log.max_size_bytes` | `10485760` (10 MB) | Rotaciona pra `audit.jsonl.1..N` quando o arquivo atual passa desse tamanho. A cadeia recomeça em cada rotação; verifique cada arquivo separado com o CLI. |
+| `audit_log.max_backups` | `5` | Número de backups rotacionados mantidos. Os mais antigos são sobrescritos. |
+| `audit_log.verify_on_startup` | `false` | Percorre a cadeia no start do servidor e emite warning em stderr se estiver quebrada. Barato pra logs de até alguns MB. |
 | `attachments.max_total_bytes` | `20971520` (20 MB) | Limite combinado de tamanho por envio. Limite duro do Gmail é 25 MB raw. |
 | `attachments.allowed_paths` | `[]` | Quando populado, sources de attach e destinos de download DEVEM estar sob uma dessas bases. Vazio = só deny patterns se aplicam. |
 | `attachments.deny_patterns` | `[]` | Regex extras pra rejeitar (matched contra path absoluto). Somam aos defaults. |
 | `attachments.use_default_deny_patterns` | `true` | Inclui o deny set built-in (`~/.ssh/`, `~/.aws/`, `id_rsa`, `.env`, `token.json`, arquivos de credencial, browser stores). |
+| `rate_limit.enabled` | `false` | Quando `true`, limita envios por hora por instância rodando. Sliding window in-memory — reseta a cada restart. |
+| `rate_limit.sends_per_hour` | `60` | Aplicado a `send_email`, `reply_to_message`, `forward_message` e `send_draft` combinados. |
+
+### Verificando o audit log
+
+Rode `mcp-gmail-manager-verify-log` pra percorrer a cadeia de hashes e confirmar que nenhuma entrada foi editada ou removida:
+
+```bash
+mcp-gmail-manager-verify-log                       # verifica o log ativo
+mcp-gmail-manager-verify-log ~/.config/.../audit.jsonl.1   # verifica um backup rotacionado
+```
+
+Exit codes: `0` OK, `1` log não encontrado, `2` JSON malformado, `3` cadeia quebrada.
 
 ### Sobrescritas via variável de ambiente
 

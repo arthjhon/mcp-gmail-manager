@@ -18,6 +18,8 @@ import json
 import mimetypes
 import os
 import re
+import sys
+import time
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
@@ -136,6 +138,45 @@ def _bootstrap_audit_hash() -> None:
     _last_audit_hash = hashlib.sha256(last_line).hexdigest()
 
 
+def _rotate_log_if_needed(path: Path) -> None:
+    """If the current log exceeds max_size_bytes, roll it into numbered backups.
+
+    Layout after rotation:
+        audit.jsonl        — brand-new empty file (chain resets)
+        audit.jsonl.1      — the log we just closed (former tip)
+        audit.jsonl.2      — previous rotation
+        ...up to max_backups
+
+    Rotation resets the in-memory hash chain to None. Each rotated file is
+    still internally verifiable end-to-end; the CLI 'mcp-gmail-manager-verify-log'
+    accepts an explicit path so operators can walk each rotation separately.
+    """
+    global _last_audit_hash, _audit_hash_bootstrapped
+    max_bytes = _CFG.audit.max_size_bytes
+    if max_bytes <= 0:
+        return
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if size < max_bytes:
+        return
+    max_backups = max(1, _CFG.audit.max_backups)
+    # Cascade rotations from oldest to newest.
+    for i in range(max_backups, 0, -1):
+        src = path.with_name(f"{path.name}.{i - 1}") if i > 1 else path
+        dst = path.with_name(f"{path.name}.{i}")
+        if src.exists():
+            try:
+                if dst.exists():
+                    dst.unlink()
+                src.rename(dst)
+            except OSError:
+                pass
+    _last_audit_hash = None
+    _audit_hash_bootstrapped = True
+
+
 def _audit_log(op: str, **fields) -> None:
     """Append a tamper-evident audit entry.
 
@@ -151,6 +192,8 @@ def _audit_log(op: str, **fields) -> None:
     _CFG.config_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not _audit_hash_bootstrapped:
         _bootstrap_audit_hash()
+    path = _CFG.audit_log_path
+    _rotate_log_if_needed(path)
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "op": op,
@@ -158,7 +201,6 @@ def _audit_log(op: str, **fields) -> None:
         **fields,
     }
     line = json.dumps(entry, ensure_ascii=False)
-    path = _CFG.audit_log_path
     with path.open("a", encoding="utf-8") as f:
         f.write(line + "\n")
     try:
@@ -177,6 +219,113 @@ def _audit_read(op: str, **fields) -> None:
     """
     if _CFG.audit.include_reads:
         _audit_log(op, read=True, **fields)
+
+
+# ---- rate limiting ----
+
+_send_timestamps: list[float] = []
+
+
+def _check_rate_limit() -> None:
+    """Sliding-window rate limit for outbound sends.
+
+    Only enforced when config.rate_limit.enabled is true. In-memory state — a
+    server restart clears the counter, which is intentional: the goal is to
+    stop runaway agents within a single Claude session, not to enforce a
+    hard global quota (Gmail already caps that server-side).
+    """
+    if not _CFG.rate_limit.enabled:
+        return
+    now = time.monotonic()
+    cutoff = now - 3600.0
+    _send_timestamps[:] = [t for t in _send_timestamps if t >= cutoff]
+    if len(_send_timestamps) >= _CFG.rate_limit.sends_per_hour:
+        raise RuntimeError(
+            f"Rate limit reached: {_CFG.rate_limit.sends_per_hour} sends/hour. "
+            f"Wait before sending again or raise config.rate_limit.sends_per_hour."
+        )
+    _send_timestamps.append(now)
+
+
+# ---- startup validation and chain verification ----
+
+def _validate_config_on_startup() -> None:
+    """Emit stderr warnings for common misconfigurations.
+
+    None of these raise — the server still starts. The warnings surface in
+    Claude Code's MCP diagnostics and remind the operator of unsafe settings.
+    """
+    warns: list[str] = []
+
+    if (_CFG.allowlist.enabled and not _CFG.allowlist.domains
+            and not _CFG.allowlist.emails):
+        warns.append(
+            "allowlist.enabled is true but both 'domains' and 'emails' are empty — "
+            "every outbound send will be rejected. Add allowed recipients or set enabled=false."
+        )
+
+    home = Path.home().resolve()
+    for p in _CFG.attachments.allowed_paths:
+        resolved = Path(p).expanduser().resolve()
+        if resolved == home:
+            warns.append(
+                f"attachments.allowed_paths contains {home} (your entire home). "
+                f"This defeats the purpose of a path allowlist; narrow to specific subdirs."
+            )
+
+    for path, label in ((_CFG.token_path, "token.json"),
+                        (_CFG.config_file_path, "config.json")):
+        if not path.is_file():
+            continue
+        try:
+            mode = path.stat().st_mode & 0o777
+        except OSError:
+            continue
+        if mode & 0o077:
+            warns.append(
+                f"{label} at {path} has permissions {oct(mode)} — "
+                f"group/other readable. Fix with: chmod 600 {path}"
+            )
+
+    for w in warns:
+        print(f"[mcp-gmail-manager] WARNING: {w}", file=sys.stderr)
+
+
+def _verify_chain_on_startup() -> None:
+    """If config.audit.verify_on_startup is true, walk the existing chain
+    and warn to stderr on the first break. Does not prevent startup."""
+    if not _CFG.audit.verify_on_startup:
+        return
+    path = _CFG.audit_log_path
+    if not path.is_file():
+        return
+    prev: str | None = None
+    try:
+        with path.open("rb") as f:
+            for lineno, raw in enumerate(f, start=1):
+                line = raw.rstrip(b"\n")
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    print(
+                        f"[mcp-gmail-manager] WARNING: audit log line {lineno} is not "
+                        f"valid JSON. Chain verification aborted at this line.",
+                        file=sys.stderr,
+                    )
+                    return
+                if entry.get("prev_hash") != prev:
+                    print(
+                        f"[mcp-gmail-manager] WARNING: audit log chain broken at line "
+                        f"{lineno} (op={entry.get('op')!r} ts={entry.get('ts')!r}). "
+                        f"Possible tampering. Run 'mcp-gmail-manager-verify-log' for details.",
+                        file=sys.stderr,
+                    )
+                    return
+                prev = hashlib.sha256(line).hexdigest()
+    except OSError:
+        return
 
 
 def _check_attachment_path(path: Path, action: str) -> None:
@@ -296,6 +445,7 @@ def _json_text(obj) -> list[types.TextContent]:
 # ============================== send / reply / forward ==============================
 
 def op_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
+    _check_rate_limit()
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
     raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
     result = _gmail_service().users().messages().send(userId="me", body={"raw": raw}).execute()
@@ -310,6 +460,7 @@ def op_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
 
 
 def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
+    _check_rate_limit()
     svc = _gmail_service()
     orig = svc.users().messages().get(
         userId="me", id=message_id, format="metadata",
@@ -349,6 +500,7 @@ def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
 
 
 def op_forward_message(message_id, to, body=None, cc=None, bcc=None, attachments=None):
+    _check_rate_limit()
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
     svc = _gmail_service()
     orig = svc.users().messages().get(userId="me", id=message_id, format="full").execute()
@@ -420,6 +572,7 @@ def op_list_drafts(query=None, page_size=20, page_token=None):
 
 
 def op_send_draft(draft_id):
+    _check_rate_limit()
     result = _gmail_service().users().drafts().send(userId="me", body={"id": draft_id}).execute()
     msg_id = result.get("id")
     _audit_log("send_draft", draft_id=draft_id, message_id=msg_id)
@@ -1024,6 +1177,8 @@ async def call_tool(name: str, arguments: dict):
 
 
 async def main():
+    _validate_config_on_startup()
+    _verify_chain_on_startup()
     async with mcp.server.stdio.stdio_server() as (read, write):
         await app.run(
             read,

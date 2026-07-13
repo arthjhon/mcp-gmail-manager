@@ -21,7 +21,8 @@ not disclose publicly until a fix is out.
 
 | Version | Supported |
 |---|---|
-| 0.2.x   | ✅ |
+| 0.2.1   | ✅ |
+| 0.2.0   | ⚠ (upgrade to 0.2.1 recommended) |
 | 0.1.x   | ❌ (upgrade to 0.2.x) |
 
 ## Threat model
@@ -49,8 +50,8 @@ via MCP. It is **not** a defence against a compromised host.
 Explicitly out of scope for the MCP layer:
 
 - **Host compromise** — an attacker with local file access can read `token.json` and call Gmail directly, bypassing every check here. Protect the host.
-- **Full audit-log rewrite** — the hash chain detects partial tampering, not a full rewrite by a local attacker who owns the file. Off-host log shipping is on the roadmap.
-- **Rate limiting** — no cap on sends per hour. A compromised agent can exhaust Gmail's quota (500/day personal, 2000/day Workspace) and cause DoS.
+- **Last-line audit tampering** — the hash chain detects modification of any entry that has a successor. An attacker who modifies only the tip entry (or truncates the log to the tip) is not caught because there is no downstream entry to verify against. Off-host log shipping (roadmap) closes this.
+- **Full audit-log rewrite** — same reasoning at the file level. If an attacker can rewrite the entire file, they can recompute the whole chain. Off-host shipping is the fix.
 - **Content pattern scanning** — outbound body/subject/attachments are not scanned for secret patterns (API keys, PII). Add server-side DLP if this matters for you.
 - **Signature and vacation responder abuse** — `update_signature` and `set_vacation_responder` accept arbitrary content. A tricked LLM could plant phishing text there. Allowlist does not cover this content (only recipients).
 - **Google account phishing** — this MCP inherits Google's own 2FA and phishing protections; nothing at the MCP layer helps if the underlying Google account is compromised.
@@ -59,11 +60,18 @@ Explicitly out of scope for the MCP layer:
 
 ## Roadmap (short list, subject to change)
 
-- Rate limiting (sends per hour, per recipient)
-- Optional off-host audit-log shipping (HTTPS POST to a configured endpoint)
-- Optional content pattern deny list (regex on outbound bodies)
+- Optional off-host audit-log shipping (HTTPS POST to a configured endpoint) — closes the full-rewrite gap
+- Optional content pattern deny list (regex on outbound bodies) — closes the "LLM leaks a secret in the body" gap
 - `preview_send_email` tool for confirm-before-send workflows
-- Signed configuration file (HMAC) to detect tampering
-- CLI `mcp-gmail-manager-verify-log` to check audit chain integrity
+- Signed configuration file (HMAC) to detect config tampering
+- Extension of allowlist checks to `update_signature` and `set_vacation_responder` bodies
 
-Contributions in any of these directions are welcome.
+Delivered in 0.2.1:
+
+- ✅ Rate limiting (`rate_limit.sends_per_hour`)
+- ✅ Log rotation (`audit_log.max_size_bytes`, `max_backups`)
+- ✅ Startup misconfiguration warnings (permissive perms on token/config, empty allowlist, `allowed_paths` = `$HOME`)
+- ✅ Startup chain verification (`audit_log.verify_on_startup`)
+- ✅ CLI `mcp-gmail-manager-verify-log` for on-demand chain integrity check
+
+Contributions in any of the open directions are welcome.

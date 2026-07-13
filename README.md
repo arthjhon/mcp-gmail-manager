@@ -246,10 +246,26 @@ Schema reference:
 | `audit_log.enabled` | `true` | Append every write/send/modify to JSONL. |
 | `audit_log.include_reads` | `false` | Also log read operations (`get_message`, `search_threads`, `get_thread`, `list_drafts`, `get_message_attachments`). Useful for detecting silent reconnaissance. |
 | `audit_log.path` | `null` | `null` → `<config_dir>/audit.jsonl`. Override to centralise logs. |
+| `audit_log.max_size_bytes` | `10485760` (10 MB) | Rotate to `audit.jsonl.1..N` when the current file exceeds this size. Chain resets across rotations; verify each file separately with the CLI. |
+| `audit_log.max_backups` | `5` | Number of rotated backups to keep. Older ones are overwritten. |
+| `audit_log.verify_on_startup` | `false` | Walk the chain on server start and emit a stderr warning if broken. Cheap for logs up to a few MB. |
 | `attachments.max_total_bytes` | `20971520` (20 MB) | Combined size cap per send. Gmail's hard limit is 25 MB raw. |
 | `attachments.allowed_paths` | `[]` | When populated, attach/download sources and destinations MUST be under one of these bases. Empty = only deny patterns apply. |
 | `attachments.deny_patterns` | `[]` | Extra regex patterns to reject (matched against absolute path). Added on top of defaults. |
 | `attachments.use_default_deny_patterns` | `true` | Include the built-in deny set (`~/.ssh/`, `~/.aws/`, `id_rsa`, `.env`, `token.json`, credential files, browser stores). |
+| `rate_limit.enabled` | `false` | When `true`, cap outbound sends per hour per running instance. In-memory sliding window — resets on server restart. |
+| `rate_limit.sends_per_hour` | `60` | Applied to `send_email`, `reply_to_message`, `forward_message`, and `send_draft` combined. |
+
+### Verifying the audit log
+
+Run `mcp-gmail-manager-verify-log` to walk the hash chain and confirm no entry has been edited or removed:
+
+```bash
+mcp-gmail-manager-verify-log                       # verify the active log
+mcp-gmail-manager-verify-log ~/.config/.../audit.jsonl.1   # verify a rotated backup
+```
+
+Exit codes: `0` OK, `1` log not found, `2` malformed JSON, `3` chain broken.
 
 ### Environment variable overrides
 

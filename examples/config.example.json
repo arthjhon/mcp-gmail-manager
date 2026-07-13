@@ -7,12 +7,19 @@
   "audit_log": {
     "enabled": true,
     "include_reads": false,
-    "path": null
+    "path": null,
+    "max_size_bytes": 10485760,
+    "max_backups": 5,
+    "verify_on_startup": false
   },
   "attachments": {
     "max_total_bytes": 20971520,
     "allowed_paths": [],
     "deny_patterns": [],
     "use_default_deny_patterns": true
+  },
+  "rate_limit": {
+    "enabled": false,
+    "sends_per_hour": 60
   }
 }

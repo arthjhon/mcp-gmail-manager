@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-gmail-manager"
-version = "0.2.0"
+version = "0.2.1"
 description = "Gmail Model Context Protocol server with recipient allowlist and local audit log."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,6 +37,7 @@ Repository = "https://github.com/arthjhon/mcp-gmail-manager"
 [project.scripts]
 mcp-gmail-manager = "mcp_gmail_manager.server:run"
 mcp-gmail-manager-auth = "mcp_gmail_manager.auth:run"
+mcp-gmail-manager-verify-log = "mcp_gmail_manager.verify_log:run"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mcp_gmail_manager"]
