@@ -9,10 +9,15 @@
 
 A comprehensive Gmail [Model Context Protocol](https://modelcontextprotocol.io) server: **33 tools** covering send, reply, forward, drafts, search, read, attachments, trash, labels, filters, signature, and vacation responder.
 
-Two optional features that distinguish it from other Gmail MCPs:
+Five defence-in-depth features that distinguish it from other Gmail MCPs:
 
-- **Local audit log** (on by default) — every write/send/modify/download appends a JSON line to `audit.jsonl`. Metadata only (no body content). Compliance trail without third-party services.
-- **Recipient allowlist** (off by default) — when enabled, every outbound operation (`send_email`, `create_draft`, `reply_to_message`, `forward_message`) checks recipients against configured domains and explicit addresses. Useful for institutional / compliance contexts. See [`examples/config.with-allowlist.json`](examples/config.with-allowlist.json) to enable.
+- **Tamper-evident audit log** (on by default) — every write/send/modify/download appends a JSON line to `audit.jsonl`, chained by SHA-256 so partial tampering is detectable. Metadata only, no body content. Optional read auditing via `audit_log.include_reads`.
+- **Recipient allowlist** (off by default) — when enabled, every outbound operation (`send_email`, `create_draft`, `reply_to_message`, `forward_message`, plus `create_filter` with a `forward` action) checks recipients against configured domains and explicit addresses.
+- **Attachment path allowlist + denylist** (denylist on by default) — the MCP refuses to attach or overwrite obvious credential files (`~/.ssh/`, `~/.aws/`, `id_rsa`, `.env`, `token.json`, etc.), closing the "LLM exfils SSH key as attachment" attack. See [Security notes](#security-notes) for the full default deny set.
+- **Prompt-injection tainted-content markers** — read tools (`get_message`, `get_thread`, `search_threads`, `list_drafts`) wrap message bodies and snippets in `<untrusted-email-content>...</untrusted-email-content>` tags. Tool descriptions instruct the LLM to treat wrapped content as data, not instructions.
+- **Least-privilege OAuth scopes** — requests `gmail.modify` + `gmail.settings.basic` only. Does NOT request `mail.google.com`, so permanent delete is intentionally unavailable.
+
+See [`examples/config.with-allowlist.json`](examples/config.with-allowlist.json) for an institutional-mode configuration.
 
 ## Tools (33)
 
@@ -221,10 +226,14 @@ Schema reference:
   },
   "audit_log": {
     "enabled": true,
+    "include_reads": false,
     "path": null
   },
   "attachments": {
-    "max_total_bytes": 20971520
+    "max_total_bytes": 20971520,
+    "allowed_paths": [],
+    "deny_patterns": [],
+    "use_default_deny_patterns": true
   }
 }
 ```
@@ -234,9 +243,13 @@ Schema reference:
 | `allowlist.enabled` | `false` | When `false`, any recipient is accepted. Enable explicitly for institutional use. |
 | `allowlist.domains` | `[]` | Lower-case domain suffixes accepted as recipients. |
 | `allowlist.emails` | `[]` | Explicit lower-case email addresses accepted regardless of domain. |
-| `audit_log.enabled` | `true` | Append every write/modify/send to JSONL. |
+| `audit_log.enabled` | `true` | Append every write/send/modify to JSONL. |
+| `audit_log.include_reads` | `false` | Also log read operations (`get_message`, `search_threads`, `get_thread`, `list_drafts`, `get_message_attachments`). Useful for detecting silent reconnaissance. |
 | `audit_log.path` | `null` | `null` → `<config_dir>/audit.jsonl`. Override to centralise logs. |
 | `attachments.max_total_bytes` | `20971520` (20 MB) | Combined size cap per send. Gmail's hard limit is 25 MB raw. |
+| `attachments.allowed_paths` | `[]` | When populated, attach/download sources and destinations MUST be under one of these bases. Empty = only deny patterns apply. |
+| `attachments.deny_patterns` | `[]` | Extra regex patterns to reject (matched against absolute path). Added on top of defaults. |
+| `attachments.use_default_deny_patterns` | `true` | Include the built-in deny set (`~/.ssh/`, `~/.aws/`, `id_rsa`, `.env`, `token.json`, credential files, browser stores). |
 
 ### Environment variable overrides
 
@@ -248,11 +261,16 @@ Schema reference:
 
 ## Security notes
 
-- **Token storage**: `token.json` is written `chmod 600`. Treat it as a password — anyone with read access can act as your Gmail account.
+- **Threat model**: this MCP is primarily hardened against a **misbehaving LLM** — prompt injection, hallucinated recipients, tricked-into-exfil scenarios. It is NOT a substitute for host security; an attacker with local access can read `token.json` and call Gmail directly, bypassing every guardrail here.
+- **Token storage**: `token.json` is written `chmod 600`. Treat it as a password.
 - **No remote attestation**: this server runs entirely on your machine. No telemetry, no third-party calls beyond `googleapis.com`.
-- **Allowlist is defence in depth, not perimeter security**: an attacker who compromises your machine can read `token.json` and call the Gmail API directly, bypassing the MCP entirely. The allowlist defends against the LLM being tricked or hallucinating malicious recipients, not against host compromise.
-- **OAuth scope is broad**: `gmail.modify` covers everything except permanent delete. If you only need to send, fork and replace the scope with `gmail.send`.
-- **Permanent delete intentionally unsupported**: we don't request `https://mail.google.com/`. Deletes go to Trash and can be undone with `untrash_*`.
+- **OAuth scope is deliberately narrow-ish**: `gmail.modify` covers send/read/label/trash/drafts. It does NOT request `mail.google.com`, so permanent delete is unavailable — deletes go to Trash and can be undone with `untrash_*`. If you only need to send, fork and replace the scope with `gmail.send`.
+- **Recipient guardrails cover forward-in-filters**: `create_filter` with an `action.forward` targeting a non-allowlisted address is rejected. Filters were a common bypass of send-only allowlists.
+- **Read tools mark content as untrusted**: bodies and snippets are wrapped in `<untrusted-email-content>...</untrusted-email-content>`. Tool descriptions instruct downstream LLMs to treat wrapped content as data. Any occurrence of the closing tag inside a message body is escaped to prevent break-out.
+- **Default attachment deny set** (source and destination) covers common credential / secret paths:
+  `~/.ssh/`, `~/.aws/`, `~/.gnupg/`, `~/.docker/config.json`, `~/.kube/`, `.env`, `.env.*`, `credentials.json`, `token.json`, `id_rsa`/`id_ed25519`/`id_ecdsa`/`id_dsa`, `.git-credentials`, `.netrc`, `wallet.dat`, `.bash_history`, `.zsh_history`, `~/.mozilla/*/logins.json`, `authorized_keys`, `known_hosts`. Extend via `attachments.deny_patterns` or narrow further via `attachments.allowed_paths`.
+- **Audit log is tamper-evident, not tamper-proof**: each entry includes `prev_hash = sha256(previous line)`. Partial modification breaks the chain and is detectable. A full log rewrite by an attacker with file-write is NOT prevented — pair with off-host log shipping (roadmap) for stronger guarantees.
+- **What is NOT mitigated**: rate limiting (a compromised agent can burn Gmail quota fast), outbound content pattern scanning (no secret regex on bodies), signature/vacation phishing (allowlist doesn't cover their content), full log rewrite by a local attacker. See [SECURITY.md](SECURITY.md) for the current threat model and roadmap.
 
 ## Limitations
 

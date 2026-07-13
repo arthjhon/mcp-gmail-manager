@@ -20,6 +20,31 @@ def _default_config_dir() -> Path:
     return base / "mcp-gmail-manager"
 
 
+# Default deny patterns block obvious credential / secret locations from being
+# attached (source path) or overwritten (destination path). Users can add or
+# opt out via config.attachments.
+DEFAULT_ATTACHMENT_DENY_PATTERNS: list[str] = [
+    r"/\.ssh/",
+    r"/\.aws/",
+    r"/\.gnupg/",
+    r"/\.docker/config\.json$",
+    r"/\.kube/",
+    r"/\.env$",
+    r"/\.env\.",
+    r"/credentials\.json$",
+    r"/token\.json$",
+    r"/id_(?:rsa|ed25519|ecdsa|dsa)$",
+    r"/\.git-credentials$",
+    r"/\.netrc$",
+    r"/wallet\.dat$",
+    r"/\.bash_history$",
+    r"/\.zsh_history$",
+    r"/\.mozilla/.*/logins\.json$",
+    r"/authorized_keys$",
+    r"/known_hosts$",
+]
+
+
 @dataclass
 class AllowlistConfig:
     enabled: bool = False
@@ -30,12 +55,20 @@ class AllowlistConfig:
 @dataclass
 class AuditConfig:
     enabled: bool = True
+    include_reads: bool = False
     path: str | None = None  # None = derived from config_dir / audit.jsonl
 
 
 @dataclass
 class AttachmentConfig:
     max_total_bytes: int = 20 * 1024 * 1024
+    allowed_paths: list[str] = field(default_factory=list)
+    deny_patterns: list[str] = field(default_factory=list)
+    use_default_deny_patterns: bool = True
+
+    def effective_deny_patterns(self) -> list[str]:
+        base = list(DEFAULT_ATTACHMENT_DENY_PATTERNS) if self.use_default_deny_patterns else []
+        return base + list(self.deny_patterns)
 
 
 @dataclass
@@ -88,11 +121,15 @@ def load_config() -> Config:
         au = data["audit_log"]
         cfg.audit = AuditConfig(
             enabled=bool(au.get("enabled", True)),
+            include_reads=bool(au.get("include_reads", False)),
             path=au.get("path"),
         )
     if isinstance(data.get("attachments"), dict):
         at = data["attachments"]
         cfg.attachments = AttachmentConfig(
             max_total_bytes=int(at.get("max_total_bytes", AttachmentConfig.max_total_bytes)),
+            allowed_paths=[str(p) for p in (at.get("allowed_paths") or [])],
+            deny_patterns=[str(p) for p in (at.get("deny_patterns") or [])],
+            use_default_deny_patterns=bool(at.get("use_default_deny_patterns", True)),
         )
     return cfg

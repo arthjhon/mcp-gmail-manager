@@ -6,9 +6,16 @@
   },
   "audit_log": {
     "enabled": true,
+    "include_reads": true,
     "path": null
   },
   "attachments": {
-    "max_total_bytes": 20971520
+    "max_total_bytes": 20971520,
+    "allowed_paths": [
+      "~/Documents",
+      "~/Downloads"
+    ],
+    "deny_patterns": [],
+    "use_default_deny_patterns": true
   }
 }
