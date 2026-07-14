@@ -21,9 +21,9 @@ not disclose publicly until a fix is out.
 
 | Version | Supported |
 |---|---|
-| 0.2.1   | ✅ |
-| 0.2.0   | ⚠ (upgrade to 0.2.1 recommended) |
-| 0.1.x   | ❌ (upgrade to 0.2.x) |
+| 0.3.0   | ✅ |
+| 0.2.x   | ⚠ (upgrade to 0.3.0 recommended) |
+| 0.1.x   | ❌ (upgrade to 0.3.0) |
 
 ## Threat model
 
@@ -52,8 +52,7 @@ Explicitly out of scope for the MCP layer:
 - **Host compromise** — an attacker with local file access can read `token.json` and call Gmail directly, bypassing every check here. Protect the host.
 - **Last-line audit tampering** — the hash chain detects modification of any entry that has a successor. An attacker who modifies only the tip entry (or truncates the log to the tip) is not caught because there is no downstream entry to verify against. Off-host log shipping (roadmap) closes this.
 - **Full audit-log rewrite** — same reasoning at the file level. If an attacker can rewrite the entire file, they can recompute the whole chain. Off-host shipping is the fix.
-- **Content pattern scanning** — outbound body/subject/attachments are not scanned for secret patterns (API keys, PII). Add server-side DLP if this matters for you.
-- **Signature and vacation responder abuse** — `update_signature` and `set_vacation_responder` accept arbitrary content. A tricked LLM could plant phishing text there. Allowlist does not cover this content (only recipients).
+- **High-recall PII / arbitrary secrets** — the content scan is high-precision (specific well-known prefixes like `AKIA`, `sk_live_`, `ghp_`). It will not catch every possible sensitive value (e.g., passwords, generic 32-char hex strings, personal data). Consider a dedicated DLP if you need broader coverage.
 - **Google account phishing** — this MCP inherits Google's own 2FA and phishing protections; nothing at the MCP layer helps if the underlying Google account is compromised.
 - **Supply chain of transitive dependencies** — we pin our direct deps with upper bounds and run `pip-audit` in CI, but transitive dep vulnerabilities can still land. Watch releases.
 - **Multi-tenant abuse** — this MCP is designed for single-user OAuth. Do not run one instance for multiple end users.
@@ -61,10 +60,14 @@ Explicitly out of scope for the MCP layer:
 ## Roadmap (short list, subject to change)
 
 - Optional off-host audit-log shipping (HTTPS POST to a configured endpoint) — closes the full-rewrite gap
-- Optional content pattern deny list (regex on outbound bodies) — closes the "LLM leaks a secret in the body" gap
-- `preview_send_email` tool for confirm-before-send workflows
 - Signed configuration file (HMAC) to detect config tampering
-- Extension of allowlist checks to `update_signature` and `set_vacation_responder` bodies
+- Optional 2FA gating on the send flow (require a passcode via an out-of-band channel)
+
+Delivered in 0.3.0:
+
+- ✅ Outbound content scanning (`content_scan.enabled`) with default regexes for AWS, Stripe, OpenAI, Anthropic, GitHub, GitLab, Google API, Slack, Twilio, PEM private keys, JWTs, and URL-embedded credentials. Per-scope toggles for subject/body/signature/vacation.
+- ✅ Embedded-address allowlist check on `update_signature` and `set_vacation_responder` bodies — blocks the LLM from planting phishing addresses in the auto-appended signature or vacation autoreply.
+- ✅ Preview + confirm send flow (`preview_send_email` + `confirm_send_email`) with hard `send_confirmation.required` mode that disables direct `send_email`. Preview payload is stored server-side keyed by an opaque `preview_id`, so confirmation always sends the previewed content — the LLM cannot preview X then send Y.
 
 Delivered in 0.2.1:
 

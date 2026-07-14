@@ -7,14 +7,17 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![MCP Compatible](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 
-A comprehensive Gmail [Model Context Protocol](https://modelcontextprotocol.io) server: **33 tools** covering send, reply, forward, drafts, search, read, attachments, trash, labels, filters, signature, and vacation responder.
+A comprehensive Gmail [Model Context Protocol](https://modelcontextprotocol.io) server: **35 tools** covering send/preview/confirm, reply, forward, drafts, search, read, attachments, trash, labels, filters, signature, and vacation responder.
 
-Five defence-in-depth features that distinguish it from other Gmail MCPs:
+Defence-in-depth features that distinguish it from other Gmail MCPs:
 
-- **Tamper-evident audit log** (on by default) — every write/send/modify/download appends a JSON line to `audit.jsonl`, chained by SHA-256 so partial tampering is detectable. Metadata only, no body content. Optional read auditing via `audit_log.include_reads`.
-- **Recipient allowlist** (off by default) — when enabled, every outbound operation (`send_email`, `create_draft`, `reply_to_message`, `forward_message`, plus `create_filter` with a `forward` action) checks recipients against configured domains and explicit addresses.
+- **Tamper-evident audit log** (on by default) — every write/send/modify/download appends a JSON line to `audit.jsonl`, chained by SHA-256 so partial tampering is detectable. Includes log rotation, startup chain verification, optional read auditing, and a `mcp-gmail-manager-verify-log` CLI.
+- **Recipient allowlist** (off by default) — when enabled, every outbound operation (`send_email`, `create_draft`, `reply_to_message`, `forward_message`, `create_filter` with a `forward` action, plus embedded addresses in signature and vacation body) checks recipients against configured domains and explicit addresses.
 - **Attachment path allowlist + denylist** (denylist on by default) — the MCP refuses to attach or overwrite obvious credential files (`~/.ssh/`, `~/.aws/`, `id_rsa`, `.env`, `token.json`, etc.), closing the "LLM exfils SSH key as attachment" attack. See [Security notes](#security-notes) for the full default deny set.
 - **Prompt-injection tainted-content markers** — read tools (`get_message`, `get_thread`, `search_threads`, `list_drafts`) wrap message bodies and snippets in `<untrusted-email-content>...</untrusted-email-content>` tags. Tool descriptions instruct the LLM to treat wrapped content as data, not instructions.
+- **Outbound content scanning** (off by default) — regex-based detection of secrets in the subject/body/signature/vacation content (AWS access keys, Stripe/OpenAI/Anthropic/GitHub/GitLab/Google/Twilio tokens, PEM private keys, JWTs, credentials embedded in URLs). Blocks the send before it hits Gmail if a pattern matches.
+- **Preview + confirm send flow** (off by default) — `preview_send_email` runs every guardrail and stores the payload; `confirm_send_email(preview_id)` delivers it. When `send_confirmation.required=true`, direct `send_email` is disabled so a compromised LLM cannot "preview X, then send Y".
+- **Rate limiting** (off by default) — cap outbound sends per hour to stop runaway agent loops from burning Gmail quota.
 - **Least-privilege OAuth scopes** — requests `gmail.modify` + `gmail.settings.basic` only. Does NOT request `mail.google.com`, so permanent delete is intentionally unavailable.
 
 See [`examples/config.with-allowlist.json`](examples/config.with-allowlist.json) for an institutional-mode configuration.
@@ -23,7 +26,7 @@ See [`examples/config.with-allowlist.json`](examples/config.with-allowlist.json)
 
 | Group | Tools |
 |---|---|
-| Send / reply / forward | `send_email`, `reply_to_message`, `forward_message` |
+| Send / reply / forward | `send_email`, `preview_send_email`, `confirm_send_email`, `reply_to_message`, `forward_message` |
 | Drafts | `create_draft`, `list_drafts`, `send_draft`, `update_draft`, `delete_draft` |
 | Read / profile | `get_profile`, `get_message`, `search_threads`, `get_thread` |
 | Attachments | `get_message_attachments`, `download_attachment` |
@@ -255,6 +258,12 @@ Schema reference:
 | `attachments.use_default_deny_patterns` | `true` | Include the built-in deny set (`~/.ssh/`, `~/.aws/`, `id_rsa`, `.env`, `token.json`, credential files, browser stores). |
 | `rate_limit.enabled` | `false` | When `true`, cap outbound sends per hour per running instance. In-memory sliding window — resets on server restart. |
 | `rate_limit.sends_per_hour` | `60` | Applied to `send_email`, `reply_to_message`, `forward_message`, and `send_draft` combined. |
+| `content_scan.enabled` | `false` | When `true`, scan outbound subjects, bodies, signatures, and vacation content for secret patterns. Matches block the operation before it reaches Gmail. |
+| `content_scan.use_default_patterns` | `true` | Include the built-in secret regexes (AWS access keys, Stripe/OpenAI/Anthropic/GitHub/GitLab/Google/Twilio tokens, PEM private keys, JWTs, URL-embedded credentials). |
+| `content_scan.patterns` | `[]` | Additional user-defined patterns. Each entry: `{"name": "...", "regex": "..."}`. Names surface in error messages for debugging. |
+| `content_scan.scan_subject` / `scan_body` / `scan_signature` / `scan_vacation` | `true` | Per-scope toggles. Useful for disabling one location while keeping others active. |
+| `send_confirmation.required` | `false` | When `true`, direct `send_email` is disabled — must go through `preview_send_email` → `confirm_send_email(preview_id)`. |
+| `send_confirmation.preview_ttl_seconds` | `300` | How long a preview stays valid before it must be re-issued. |
 
 ### Verifying the audit log
 

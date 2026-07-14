@@ -45,6 +45,28 @@ DEFAULT_ATTACHMENT_DENY_PATTERNS: list[str] = [
 ]
 
 
+# Default outbound-content secret patterns. Each entry: {name, regex}. Names
+# surface in error messages so users can debug false positives. Patterns are
+# intentionally conservative — high-precision (uncommon prefix + length) over
+# high-recall — to keep false positives out of legitimate email bodies.
+DEFAULT_SECRET_PATTERNS: list[dict] = [
+    {"name": "aws_access_key",     "regex": r"\bAKIA[0-9A-Z]{16}\b"},
+    {"name": "stripe_live_key",    "regex": r"\bsk_live_[a-zA-Z0-9]{24,}\b"},
+    {"name": "stripe_restricted",  "regex": r"\brk_live_[a-zA-Z0-9]{24,}\b"},
+    {"name": "pem_private_key",    "regex": r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY(?: BLOCK)?-----"},
+    {"name": "github_pat_v1",      "regex": r"\bghp_[a-zA-Z0-9]{36,}\b"},
+    {"name": "github_pat_v2",      "regex": r"\bgithub_pat_[a-zA-Z0-9_]{80,}\b"},
+    {"name": "gitlab_pat",         "regex": r"\bglpat-[a-zA-Z0-9_\-]{20,}\b"},
+    {"name": "slack_token",        "regex": r"\bxox[baprs]-[0-9]+-[0-9]+-[0-9]+-[a-f0-9]{32,}\b"},
+    {"name": "google_api_key",     "regex": r"\bAIza[0-9A-Za-z_\-]{35}\b"},
+    {"name": "openai_api_key",     "regex": r"\bsk-[a-zA-Z0-9]{48,}\b"},
+    {"name": "anthropic_api_key",  "regex": r"\bsk-ant-api\d{2}-[a-zA-Z0-9_\-]{80,}\b"},
+    {"name": "jwt",                "regex": r"\beyJ[a-zA-Z0-9_=\-]+\.eyJ[a-zA-Z0-9_=\-]+\.[a-zA-Z0-9_=\-]+"},
+    {"name": "twilio_sid",         "regex": r"\bAC[a-f0-9]{32}\b"},
+    {"name": "url_with_credential","regex": r"://[^:\s/@]+:[^@\s]{4,}@[^\s]+"},
+]
+
+
 @dataclass
 class AllowlistConfig:
     enabled: bool = False
@@ -81,12 +103,37 @@ class RateLimitConfig:
 
 
 @dataclass
+class ContentScanConfig:
+    """Regex-based deny list for secrets and credentials in outbound content."""
+    enabled: bool = False
+    patterns: list[dict] = field(default_factory=list)  # user-added, added on top of defaults
+    use_default_patterns: bool = True
+    scan_subject: bool = True
+    scan_body: bool = True
+    scan_signature: bool = True
+    scan_vacation: bool = True
+
+    def effective_patterns(self) -> list[dict]:
+        base = list(DEFAULT_SECRET_PATTERNS) if self.use_default_patterns else []
+        return base + list(self.patterns)
+
+
+@dataclass
+class SendConfirmationConfig:
+    """Two-step confirm-before-send flow: preview_send_email → confirm_send_email."""
+    required: bool = False
+    preview_ttl_seconds: int = 300
+
+
+@dataclass
 class Config:
     config_dir: Path = field(default_factory=_default_config_dir)
     allowlist: AllowlistConfig = field(default_factory=AllowlistConfig)
     audit: AuditConfig = field(default_factory=AuditConfig)
     attachments: AttachmentConfig = field(default_factory=AttachmentConfig)
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
+    content_scan: ContentScanConfig = field(default_factory=ContentScanConfig)
+    send_confirmation: SendConfirmationConfig = field(default_factory=SendConfirmationConfig)
 
     @property
     def credentials_path(self) -> Path:
@@ -150,5 +197,30 @@ def load_config() -> Config:
         cfg.rate_limit = RateLimitConfig(
             enabled=bool(rl.get("enabled", False)),
             sends_per_hour=int(rl.get("sends_per_hour", RateLimitConfig.sends_per_hour)),
+        )
+    if isinstance(data.get("content_scan"), dict):
+        cs = data["content_scan"]
+        raw_patterns = cs.get("patterns") or []
+        parsed_patterns = []
+        for p in raw_patterns:
+            if isinstance(p, dict) and p.get("regex"):
+                parsed_patterns.append(
+                    {"name": str(p.get("name") or "user_pattern"),
+                     "regex": str(p["regex"])}
+                )
+        cfg.content_scan = ContentScanConfig(
+            enabled=bool(cs.get("enabled", False)),
+            patterns=parsed_patterns,
+            use_default_patterns=bool(cs.get("use_default_patterns", True)),
+            scan_subject=bool(cs.get("scan_subject", True)),
+            scan_body=bool(cs.get("scan_body", True)),
+            scan_signature=bool(cs.get("scan_signature", True)),
+            scan_vacation=bool(cs.get("scan_vacation", True)),
+        )
+    if isinstance(data.get("send_confirmation"), dict):
+        sc = data["send_confirmation"]
+        cfg.send_confirmation = SendConfirmationConfig(
+            required=bool(sc.get("required", False)),
+            preview_ttl_seconds=int(sc.get("preview_ttl_seconds", SendConfirmationConfig.preview_ttl_seconds)),
         )
     return cfg

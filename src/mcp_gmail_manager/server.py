@@ -18,6 +18,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import sys
 import time
 from datetime import datetime, timezone
@@ -442,11 +443,92 @@ def _json_text(obj) -> list[types.TextContent]:
     return [types.TextContent(type="text", text=json.dumps(obj, ensure_ascii=False, indent=2))]
 
 
+# ---- content scanning (v0.3.0) ----
+
+_EMAIL_EMBEDDED_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+
+
+def _scan_content(text: str | None, scope: str) -> list[str]:
+    """Match text against configured secret patterns. Returns list of pattern
+    names that matched (empty = clean). scope is one of: subject, body,
+    signature, vacation — each can be individually disabled in config.
+    """
+    if not text or not _CFG.content_scan.enabled:
+        return []
+    scope_flag = getattr(_CFG.content_scan, f"scan_{scope}", True)
+    if not scope_flag:
+        return []
+    matches: list[str] = []
+    for pat in _CFG.content_scan.effective_patterns():
+        try:
+            if re.search(pat["regex"], text):
+                matches.append(pat["name"])
+        except re.error:
+            # Malformed user pattern — surface a warning but don't crash the send.
+            print(
+                f"[mcp-gmail-manager] WARNING: invalid content_scan regex "
+                f"{pat.get('name')!r}: {pat.get('regex')!r}",
+                file=sys.stderr,
+            )
+    return matches
+
+
+def _reject_if_content_matched(matched_by_scope: dict[str, list[str]], location: str) -> None:
+    """Raise PermissionError with all secret matches across scanned scopes."""
+    hits = {k: v for k, v in matched_by_scope.items() if v}
+    if not hits:
+        return
+    parts = ", ".join(f"{k}={sorted(set(v))}" for k, v in hits.items())
+    raise PermissionError(
+        f"Content scan blocked {location}: matched pattern(s) {parts}. "
+        f"Remove the sensitive content or set content_scan.enabled=false if this is a false positive."
+    )
+
+
+def _check_embedded_addresses(text: str | None, source: str) -> None:
+    """Extract email addresses from text and run each through the recipient
+    allowlist. Blocks LLM from planting phishing addresses in signatures or
+    vacation autoresponders. No-op when allowlist is disabled.
+    """
+    if not text or not _CFG.allowlist.enabled:
+        return
+    seen: set[str] = set()
+    for addr in _EMAIL_EMBEDDED_RE.findall(text):
+        low = addr.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        try:
+            _check_recipient(addr)
+        except PermissionError as e:
+            raise PermissionError(
+                f"{source} contains embedded email address '{addr}' outside the "
+                f"recipient allowlist. ({e})"
+            ) from e
+
+
+# ---- send preview / confirm (v0.3.0) ----
+
+_pending_previews: dict[str, dict] = {}
+
+
+def _cleanup_expired_previews() -> None:
+    ttl = _CFG.send_confirmation.preview_ttl_seconds
+    now = time.monotonic()
+    for k in [k for k, v in _pending_previews.items() if now - v["created_at"] > ttl]:
+        _pending_previews.pop(k, None)
+
+
 # ============================== send / reply / forward ==============================
 
-def op_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
+def _do_send_email(to, subject, body, cc, bcc, attachments):
+    """Shared send path used by both direct send_email and confirm_send_email."""
     _check_rate_limit()
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
+    _reject_if_content_matched(
+        {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
+        "send",
+    )
     raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
     result = _gmail_service().users().messages().send(userId="me", body={"raw": raw}).execute()
     msg_id = result.get("id")
@@ -459,8 +541,66 @@ def op_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
     return {"message_id": msg_id, "thread_id": result.get("threadId")}
 
 
+def op_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
+    if _CFG.send_confirmation.required:
+        raise PermissionError(
+            "Direct send_email is disabled by config.send_confirmation.required=true. "
+            "Call preview_send_email first, then confirm_send_email with the returned preview_id."
+        )
+    return _do_send_email(to, subject, body, cc, bcc, attachments)
+
+
+def op_preview_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
+    """Dry-run of send_email: runs every guardrail but does NOT deliver. Stores
+    the exact payload keyed by a preview_id; confirm_send_email(preview_id)
+    sends that stored payload, so a compromised LLM cannot "preview X, then
+    send Y" — the confirmation always sends what was previewed."""
+    _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
+    _reject_if_content_matched(
+        {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
+        "preview",
+    )
+    _cleanup_expired_previews()
+    preview_id = secrets.token_urlsafe(16)
+    _pending_previews[preview_id] = {
+        "created_at": time.monotonic(),
+        "args": {
+            "to": list(to), "subject": subject, "body": body,
+            "cc": list(cc or []), "bcc": list(bcc or []),
+            "attachments": list(attachments or []),
+        },
+    }
+    body_str = body or ""
+    return {
+        "preview_id": preview_id,
+        "expires_in_seconds": _CFG.send_confirmation.preview_ttl_seconds,
+        "to": to, "cc": cc or [], "bcc": bcc or [],
+        "subject": subject,
+        "body_preview": body_str[:500] + ("..." if len(body_str) > 500 else ""),
+        "body_length": len(body_str),
+        "attachment_names": [Path(a["path"]).name for a in (attachments or [])],
+    }
+
+
+def op_confirm_send_email(preview_id: str):
+    """Send the payload previously registered by preview_send_email(preview_id).
+    Rate-limit and full guardrails re-run at send time."""
+    _cleanup_expired_previews()
+    preview = _pending_previews.pop(preview_id, None)
+    if not preview:
+        raise ValueError(
+            f"preview_id {preview_id!r} not found or expired. Call preview_send_email again."
+        )
+    args = preview["args"]
+    return _do_send_email(
+        args["to"], args["subject"], args["body"],
+        args["cc"], args["bcc"], args["attachments"],
+    )
+
+
 def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
     _check_rate_limit()
+    _reject_if_content_matched({"body": _scan_content(body, "body")}, "reply")
     svc = _gmail_service()
     orig = svc.users().messages().get(
         userId="me", id=message_id, format="metadata",
@@ -502,6 +642,7 @@ def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
 def op_forward_message(message_id, to, body=None, cc=None, bcc=None, attachments=None):
     _check_rate_limit()
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
+    _reject_if_content_matched({"body": _scan_content(body, "body")}, "forward")
     svc = _gmail_service()
     orig = svc.users().messages().get(userId="me", id=message_id, format="full").execute()
     payload = orig.get("payload", {})
@@ -530,6 +671,10 @@ def op_forward_message(message_id, to, body=None, cc=None, bcc=None, attachments
 def op_create_draft(to=None, subject=None, body=None, cc=None, bcc=None, attachments=None, reply_to_message_id=None):
     if to or cc or bcc:
         _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=False)
+    _reject_if_content_matched(
+        {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
+        "create_draft",
+    )
     raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
     draft_body: dict = {"message": {"raw": raw}}
     if reply_to_message_id:
@@ -582,6 +727,10 @@ def op_send_draft(draft_id):
 def op_update_draft(draft_id, to=None, subject=None, body=None, cc=None, bcc=None, attachments=None):
     if to or cc or bcc:
         _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=False)
+    _reject_if_content_matched(
+        {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
+        "update_draft",
+    )
     raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
     result = _gmail_service().users().drafts().update(
         userId="me", id=draft_id, body={"message": {"raw": raw}}
@@ -844,6 +993,11 @@ def op_get_signature(send_as_email=None):
 
 
 def op_update_signature(signature_html, send_as_email=None):
+    _reject_if_content_matched(
+        {"signature": _scan_content(signature_html, "signature")},
+        "update_signature",
+    )
+    _check_embedded_addresses(signature_html, "signature")
     target = (send_as_email or _my_email())
     sa = _gmail_service().users().settings().sendAs().patch(
         userId="me", sendAsEmail=target, body={"signature": signature_html}
@@ -859,6 +1013,16 @@ def op_get_vacation_responder():
 def op_set_vacation_responder(enabled, subject=None, body_text=None, body_html=None,
                               restrict_to_contacts=False, restrict_to_domain=False,
                               start_time_millis=None, end_time_millis=None):
+    _reject_if_content_matched(
+        {
+            "subject": _scan_content(subject, "vacation"),
+            "body_text": _scan_content(body_text, "vacation"),
+            "body_html": _scan_content(body_html, "vacation"),
+        },
+        "vacation_responder",
+    )
+    for label, txt in (("vacation body_text", body_text), ("vacation body_html", body_html)):
+        _check_embedded_addresses(txt, label)
     body: dict = {"enableAutoReply": bool(enabled)}
     if subject is not None:
         body["responseSubject"] = subject
@@ -905,7 +1069,12 @@ async def list_tools() -> list[types.Tool]:
     addr_array = {"type": "array", "items": {"type": "string"}}
     return [
         types.Tool(name="send_email",
-            description="Send an email immediately. Recipient allowlist enforced if enabled in config.",
+            description=(
+                "Send an email immediately. Recipient allowlist enforced if enabled. "
+                "Content scan (secret detection) runs on subject and body if enabled. "
+                "Disabled entirely when send_confirmation.required=true — use "
+                "preview_send_email + confirm_send_email in that case."
+            ),
             inputSchema={
                 "type": "object", "required": ["to", "subject", "body"],
                 "properties": {
@@ -913,6 +1082,30 @@ async def list_tools() -> list[types.Tool]:
                     "cc": addr_array, "bcc": addr_array,
                     "attachments": {"type": "array", "items": _ATT_SCHEMA},
                 }}),
+        types.Tool(name="preview_send_email",
+            description=(
+                "Dry-run of send_email: runs every guardrail (allowlist, content scan, "
+                "attachment checks) and stores the payload keyed by a preview_id. Does "
+                "NOT deliver. Follow up with confirm_send_email(preview_id) to send. The "
+                "confirmation always sends the previewed payload, not a new one — a "
+                "compromised LLM cannot preview X and then send Y."
+            ),
+            inputSchema={
+                "type": "object", "required": ["to", "subject", "body"],
+                "properties": {
+                    "to": addr_array, "subject": {"type": "string"}, "body": {"type": "string"},
+                    "cc": addr_array, "bcc": addr_array,
+                    "attachments": {"type": "array", "items": _ATT_SCHEMA},
+                }}),
+        types.Tool(name="confirm_send_email",
+            description=(
+                "Send the payload previously registered by preview_send_email(preview_id). "
+                "Rate limit and all guardrails re-check at send time. Returns the sent "
+                "message id."
+            ),
+            inputSchema={
+                "type": "object", "required": ["preview_id"],
+                "properties": {"preview_id": {"type": "string"}}}),
         types.Tool(name="reply_to_message",
             description="Reply to a message. Auto-fills To (and Cc if reply_all) from the original; preserves threading.",
             inputSchema={
@@ -1124,6 +1317,8 @@ async def list_tools() -> list[types.Tool]:
 
 _DISPATCH = {
     "send_email":              lambda a: op_send_email(a["to"], a["subject"], a["body"], a.get("cc"), a.get("bcc"), a.get("attachments")),
+    "preview_send_email":      lambda a: op_preview_send_email(a["to"], a["subject"], a["body"], a.get("cc"), a.get("bcc"), a.get("attachments")),
+    "confirm_send_email":      lambda a: op_confirm_send_email(a["preview_id"]),
     "reply_to_message":        lambda a: op_reply_to_message(a["message_id"], a["body"], a.get("attachments"), a.get("reply_all", False)),
     "forward_message":         lambda a: op_forward_message(a["message_id"], a["to"], a.get("body"), a.get("cc"), a.get("bcc"), a.get("attachments")),
     "create_draft":            lambda a: op_create_draft(a.get("to"), a["subject"], a["body"], a.get("cc"), a.get("bcc"), a.get("attachments"), a.get("reply_to_message_id")),

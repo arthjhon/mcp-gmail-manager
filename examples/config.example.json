@@ -21,5 +21,18 @@
   "rate_limit": {
     "enabled": false,
     "sends_per_hour": 60
+  },
+  "content_scan": {
+    "enabled": false,
+    "patterns": [],
+    "use_default_patterns": true,
+    "scan_subject": true,
+    "scan_body": true,
+    "scan_signature": true,
+    "scan_vacation": true
+  },
+  "send_confirmation": {
+    "required": false,
+    "preview_ttl_seconds": 300
   }
 }

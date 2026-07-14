@@ -7,7 +7,7 @@
 [![Licença: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 [![Compatível com MCP](https://img.shields.io/badge/MCP-compatible-blueviolet.svg)](https://modelcontextprotocol.io)
 
-Servidor [Model Context Protocol](https://modelcontextprotocol.io) abrangente para o Gmail: **33 ferramentas** cobrindo envio, resposta, encaminhamento, rascunhos, busca, leitura, anexos, lixeira, labels, filtros, assinatura e resposta automática de férias.
+Servidor [Model Context Protocol](https://modelcontextprotocol.io) abrangente para o Gmail: **35 ferramentas** cobrindo envio/preview/confirm, resposta, encaminhamento, rascunhos, busca, leitura, anexos, lixeira, labels, filtros, assinatura e resposta automática de férias.
 
 Cinco funcionalidades de defesa em profundidade que diferenciam este MCP de outros para Gmail:
 
@@ -23,7 +23,7 @@ Veja [`examples/config.with-allowlist.json`](examples/config.with-allowlist.json
 
 | Grupo | Ferramentas |
 |---|---|
-| Envio / resposta / encaminhamento | `send_email`, `reply_to_message`, `forward_message` |
+| Envio / resposta / encaminhamento | `send_email`, `preview_send_email`, `confirm_send_email`, `reply_to_message`, `forward_message` |
 | Rascunhos | `create_draft`, `list_drafts`, `send_draft`, `update_draft`, `delete_draft` |
 | Leitura / perfil | `get_profile`, `get_message`, `search_threads`, `get_thread` |
 | Anexos | `get_message_attachments`, `download_attachment` |
@@ -255,6 +255,12 @@ Referência de schema:
 | `attachments.use_default_deny_patterns` | `true` | Inclui o deny set built-in (`~/.ssh/`, `~/.aws/`, `id_rsa`, `.env`, `token.json`, arquivos de credencial, browser stores). |
 | `rate_limit.enabled` | `false` | Quando `true`, limita envios por hora por instância rodando. Sliding window in-memory — reseta a cada restart. |
 | `rate_limit.sends_per_hour` | `60` | Aplicado a `send_email`, `reply_to_message`, `forward_message` e `send_draft` combinados. |
+| `content_scan.enabled` | `false` | Quando `true`, escaneia subject/body/signature/vacation outbound procurando padrões de secrets. Matches bloqueiam a operação antes de chegar no Gmail. |
+| `content_scan.use_default_patterns` | `true` | Inclui os regexes built-in (chaves AWS, tokens Stripe/OpenAI/Anthropic/GitHub/GitLab/Google/Twilio, chaves PEM privadas, JWTs, credenciais embutidas em URL). |
+| `content_scan.patterns` | `[]` | Padrões extras do usuário. Cada entrada: `{"name": "...", "regex": "..."}`. Nomes aparecem nas mensagens de erro pra debug. |
+| `content_scan.scan_subject` / `scan_body` / `scan_signature` / `scan_vacation` | `true` | Toggles por escopo. Útil pra desligar um local mantendo outros ativos. |
+| `send_confirmation.required` | `false` | Quando `true`, `send_email` direto é desabilitado — precisa passar por `preview_send_email` → `confirm_send_email(preview_id)`. |
+| `send_confirmation.preview_ttl_seconds` | `300` | Quanto tempo um preview fica válido antes de precisar ser reemitido. |
 
 ### Verificando o audit log
 
