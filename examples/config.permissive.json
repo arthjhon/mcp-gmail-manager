@@ -1,16 +1,16 @@
 {
   "allowlist": {
-    "enabled": true,
+    "enabled": false,
     "domains": [],
     "emails": []
   },
   "audit_log": {
     "enabled": true,
-    "include_reads": true,
+    "include_reads": false,
     "path": null,
     "max_size_bytes": 10485760,
     "max_backups": 5,
-    "verify_on_startup": true
+    "verify_on_startup": false
   },
   "attachments": {
     "max_total_bytes": 20971520,
@@ -19,11 +19,11 @@
     "use_default_deny_patterns": true
   },
   "rate_limit": {
-    "enabled": true,
-    "sends_per_hour": 30
+    "enabled": false,
+    "sends_per_hour": 60
   },
   "content_scan": {
-    "enabled": true,
+    "enabled": false,
     "patterns": [],
     "use_default_patterns": true,
     "scan_subject": true,
@@ -32,7 +32,7 @@
     "scan_vacation": true
   },
   "send_confirmation": {
-    "required": true,
+    "required": false,
     "preview_ttl_seconds": 300
   }
 }

@@ -215,8 +215,9 @@ Compromise of one account's token does not leak the other — each lives in a se
 
 `~/.config/mcp-gmail-manager/config.json` is optional — if it doesn't exist, sensible defaults apply (no allowlist, audit log enabled). Two ready-to-copy examples are provided:
 
-- [`examples/config.example.json`](examples/config.example.json) — minimal, no allowlist (default behaviour). Use this if you want the MCP to send to any address.
-- [`examples/config.with-allowlist.json`](examples/config.with-allowlist.json) — institutional setup with allowlist enforced.
+- [`examples/config.example.json`](examples/config.example.json) — **hardened defaults** (recommended starting point). Every guardrail on; allowlist enabled but empty, so the startup warning will point you at what to configure first.
+- [`examples/config.with-allowlist.json`](examples/config.with-allowlist.json) — fully-populated institutional example with placeholder domains.
+- [`examples/config.permissive.json`](examples/config.permissive.json) — **explicit opt-out** for users who want no guardrails (allowlist off, content scan off, rate limit off, no send confirmation). Consider this only if you understand the blast radius.
 
 Schema reference:
 

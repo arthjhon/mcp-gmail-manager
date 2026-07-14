@@ -21,9 +21,19 @@ not disclose publicly until a fix is out.
 
 | Version | Supported |
 |---|---|
-| 0.3.0   | ✅ |
-| 0.2.x   | ⚠ (upgrade to 0.3.0 recommended) |
-| 0.1.x   | ❌ (upgrade to 0.3.0) |
+| 0.3.1   | ✅ |
+| 0.3.0   | ⚠ (upgrade to 0.3.1 — closes F1/F2/F4 from the external audit) |
+| 0.2.x   | ⚠ (upgrade to 0.3.1 recommended) |
+| 0.1.x   | ❌ (upgrade to 0.3.1) |
+
+## External review
+
+v0.3.0 was externally reviewed by [Haider Ali](https://github.com/shadowhunter-92) of
+[AgentBridge](https://github.com/shadowhunter-92/agentbridge) on 2026-07-14 (static + design review against
+the OWASP Top-10 for Agentic Applications 2026). The review confirmed the primary controls
+close the attack paths they were designed to close, and produced 0 Critical / 0 High / 2 Medium
+/ 2 Low findings. **v0.3.1 fixes F1, F2, and F4**; F3 is documented as an accepted-risk policy
+decision (see below). The full report is available on request.
 
 ## Threat model
 
@@ -62,6 +72,13 @@ Explicitly out of scope for the MCP layer:
 - Optional off-host audit-log shipping (HTTPS POST to a configured endpoint) — closes the full-rewrite gap
 - Signed configuration file (HMAC) to detect config tampering
 - Optional 2FA gating on the send flow (require a passcode via an out-of-band channel)
+
+Delivered in 0.3.1 (external audit response):
+
+- ✅ **F1**: `_wrap_untrusted` extended to `subject`, `from`, `to`, `cc` on `get_message`/`get_thread`/`list_drafts` and to attachment `filename` on `get_message_attachments`. Attacker-controlled header fields and attachment filenames now carry the same `<untrusted-email-content>` markers as bodies and snippets, and tool descriptions reflect the extended coverage.
+- ✅ **F2**: `config.example.json` — the file new users are most likely to copy — now ships with every guardrail **on** by default (allowlist, content scan, rate limit, send-confirmation, verify-on-startup). A new `config.permissive.json` documents the opt-out mode for users who explicitly want fewer restrictions. `config.with-allowlist.json` remains as a fully-populated institutional example.
+- ✅ **F4**: `send_draft` now fetches the draft's actual Gmail-side content and re-runs the recipient allowlist and content scan at send time. A draft edited via the Gmail web UI (or created before the current guardrails were configured) is validated at send time instead of trusted based on write-time checks.
+- ⚠ **F3** (accepted risk): `pip-audit` in CI remains `continue-on-error: true`. Transitive dependency CVEs surface faster than we can pin them, so gating the build would either force noisy releases or tempt us to ignore the signal. The workflow's own comment documents this rationale. A future refinement — gating only on Critical/High severity — is a candidate for the roadmap.
 
 Delivered in 0.3.0:
 
