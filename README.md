@@ -46,29 +46,56 @@ OAuth scopes requested: `gmail.modify` + `gmail.settings.basic`. Does **not** re
 
 ## Install
 
-**Recommended — [pipx](https://pipx.pypa.io/)** (installs in an isolated venv, exposes the entry points on `$PATH`):
+Supported on Linux, macOS, and Windows. Recommended path is [pipx](https://pipx.pypa.io/), which installs the CLI into an isolated venv and exposes the entry points on `$PATH`.
 
-```bash
-pipx install mcp-gmail-manager
-```
-
-If `pipx` is missing:
+### Linux (Debian / Ubuntu / Mint / Fedora / Arch)
 
 ```bash
 sudo apt install pipx        # Debian / Ubuntu / Mint
-brew install pipx            # macOS
-pipx ensurepath              # makes ~/.local/bin available, may need shell restart
+sudo dnf install pipx        # Fedora
+sudo pacman -S python-pipx   # Arch
+pipx ensurepath              # adds ~/.local/bin to PATH
+# reopen shell or: source ~/.bashrc
+
+pipx install mcp-gmail-manager
 ```
 
-**Alternative — manual venv:**
+### macOS
+
+```bash
+brew install pipx            # or: python3 -m pip install --user pipx
+pipx ensurepath              # adds ~/.local/bin to PATH
+# reopen shell or: source ~/.zshrc
+
+pipx install mcp-gmail-manager
+```
+
+### Windows (PowerShell)
+
+```powershell
+# If you don't have Python yet:  winget install --id Python.Python.3.12
+python -m pip install --user pipx
+python -m pipx ensurepath
+# close and reopen PowerShell
+
+pipx install mcp-gmail-manager
+```
+
+Windows caveats — everything works, with two model-of-the-OS notes:
+
+- **Token file permissions.** On Linux/macOS the MCP writes `token.json` with `chmod 0o600`. On Windows there is no POSIX chmod, so the file inherits your `%USERPROFILE%` ACL — protected against other user accounts, but any process running as *your* user can read it. Same effective posture as most Windows CLI tools that store OAuth tokens.
+- **Attachment path deny list works.** As of v0.3.2 the deny/allow-list matching normalises paths to forward-slash form via `Path.as_posix()`, so a Windows path like `C:\Users\me\.ssh\id_rsa` is correctly caught by the default `~/.ssh/` deny pattern. Confirmed by the smoke suite on both platforms.
+
+### Alternative on any OS — manual venv
 
 ```bash
 python3 -m venv ~/.venv-mcp-gmail
 ~/.venv-mcp-gmail/bin/pip install mcp-gmail-manager
+# Windows: python -m venv %USERPROFILE%\.venv-mcp-gmail
 # Use the absolute path when registering with Claude Code (see below)
 ```
 
-**Why not plain `pip install` system-wide?** On modern Debian-based distros it fails with `error: externally-managed-environment` ([PEP 668](https://peps.python.org/pep-0668/)) — the OS protects its Python. The two methods above are the canonical workarounds.
+**Why not plain `pip install` system-wide?** On modern Debian-based distros and Homebrew Python it fails with `error: externally-managed-environment` ([PEP 668](https://peps.python.org/pep-0668/)) — the OS protects its Python. The pipx and venv methods above are the canonical workarounds.
 
 **From source:**
 

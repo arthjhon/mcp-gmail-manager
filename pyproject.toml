@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mcp-gmail-manager"
-version = "0.3.1"
+version = "0.3.2"
 description = "Gmail Model Context Protocol server with recipient allowlist and local audit log."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -21,10 +21,11 @@ not disclose publicly until a fix is out.
 
 | Version | Supported |
 |---|---|
-| 0.3.1   | ✅ |
-| 0.3.0   | ⚠ (upgrade to 0.3.1 — closes F1/F2/F4 from the external audit) |
-| 0.2.x   | ⚠ (upgrade to 0.3.1 recommended) |
-| 0.1.x   | ❌ (upgrade to 0.3.1) |
+| 0.3.2   | ✅ (Windows path-normalisation fix — recommended for anyone on Windows) |
+| 0.3.1   | ⚠ (functional on Windows but attachment deny list silently no-ops for backslash paths — upgrade to 0.3.2) |
+| 0.3.0   | ⚠ (upgrade to 0.3.2 — closes F1/F2/F4 from the external audit + Windows fix) |
+| 0.2.x   | ⚠ (upgrade to 0.3.2 recommended) |
+| 0.1.x   | ❌ (upgrade to 0.3.2) |
 
 ## External review
 
@@ -59,7 +60,7 @@ via MCP. It is **not** a defence against a compromised host.
 
 Explicitly out of scope for the MCP layer:
 
-- **Host compromise** — an attacker with local file access can read `token.json` and call Gmail directly, bypassing every check here. Protect the host.
+- **Host compromise** — an attacker with local file access can read `token.json` and call Gmail directly, bypassing every check here. Protect the host. On Windows this bar is lower because there is no POSIX `chmod` — the token file is protected against other user accounts but any process running as the current user can read it. Same posture as most Windows OAuth CLI tools.
 - **Last-line audit tampering** — the hash chain detects modification of any entry that has a successor. An attacker who modifies only the tip entry (or truncates the log to the tip) is not caught because there is no downstream entry to verify against. Off-host log shipping (roadmap) closes this.
 - **Full audit-log rewrite** — same reasoning at the file level. If an attacker can rewrite the entire file, they can recompute the whole chain. Off-host shipping is the fix.
 - **High-recall PII / arbitrary secrets** — the content scan is high-precision (specific well-known prefixes like `AKIA`, `sk_live_`, `ghp_`). It will not catch every possible sensitive value (e.g., passwords, generic 32-char hex strings, personal data). Consider a dedicated DLP if you need broader coverage.
@@ -72,6 +73,11 @@ Explicitly out of scope for the MCP layer:
 - Optional off-host audit-log shipping (HTTPS POST to a configured endpoint) — closes the full-rewrite gap
 - Signed configuration file (HMAC) to detect config tampering
 - Optional 2FA gating on the send flow (require a passcode via an out-of-band channel)
+
+Delivered in 0.3.2:
+
+- ✅ **Cross-platform attachment deny list.** `_check_attachment_path` now normalises paths via `Path.as_posix()` before regex matching, so the default deny patterns (`~/.ssh/`, `~/.aws/`, `id_rsa`, `.env`, `token.json`, etc.) also catch Windows backslash paths like `C:\Users\me\.ssh\id_rsa`. Prior to this fix the deny list silently no-op'd on Windows — the behaviour was intended, the pattern set was fine, only the string comparison was Linux-shaped.
+- ✅ **Documented Windows caveats.** README and this document explicitly note that `chmod 600` on `token.json` is a no-op on Windows (the file inherits the `%USERPROFILE%` ACL — protected against other Windows accounts but not against other processes running as the same user).
 
 Delivered in 0.3.1 (external audit response):
 

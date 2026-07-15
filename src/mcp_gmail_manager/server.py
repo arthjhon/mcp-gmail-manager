@@ -337,12 +337,18 @@ def _check_attachment_path(path: Path, action: str) -> None:
       - allowed_paths whitelist (if configured, path must be under one of these bases)
 
     Blocks attempts to attach credential files (exfil) or overwrite them (tamper).
+
+    The path string is normalised to forward-slash form via `Path.as_posix()` before
+    regex matching so the default patterns (which use `/` as separator) match on
+    Windows too — otherwise a Windows path like ``C:\\Users\\x\\.ssh\\id_rsa`` would
+    silently slip past a pattern like ``r"/\\.ssh/"``.
     """
-    abs_str = str(path)
+    display = str(path)
+    match_str = path.as_posix()
     for pattern in _CFG.attachments.effective_deny_patterns():
-        if re.search(pattern, abs_str):
+        if re.search(pattern, match_str):
             raise PermissionError(
-                f"{action} negado: {abs_str!r} bate com deny pattern {pattern!r} "
+                f"{action} negado: {display!r} bate com deny pattern {pattern!r} "
                 f"(possivel exfil/overwrite de credencial ou segredo)."
             )
     allowed = _CFG.attachments.allowed_paths
@@ -351,7 +357,7 @@ def _check_attachment_path(path: Path, action: str) -> None:
         ok = any(path == b or b in path.parents for b in bases)
         if not ok:
             raise PermissionError(
-                f"{action} negado: {abs_str!r} fora de allowed_paths "
+                f"{action} negado: {display!r} fora de allowed_paths "
                 f"{[str(b) for b in bases]}."
             )
 
