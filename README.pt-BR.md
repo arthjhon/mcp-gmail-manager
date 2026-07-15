@@ -78,10 +78,11 @@ python -m pipx ensurepath
 pipx install mcp-gmail-manager
 ```
 
-Caveats Windows — tudo funciona, com duas notas sobre o modelo do OS:
+Caveats Windows — tudo funciona, com três notas:
 
 - **Permissões do token.** Em Linux/macOS o MCP grava `token.json` com `chmod 0o600`. Windows não tem `chmod` POSIX, então o arquivo herda a ACL do teu `%USERPROFILE%` — protegido contra outras contas de usuário, mas qualquer processo rodando como *teu* usuário consegue ler. Mesma postura efetiva da maioria dos CLI Windows que guarda token OAuth.
 - **Deny list de anexos funciona.** A partir da v0.3.2 o matching de deny/allow-list normaliza paths pra forward-slash via `Path.as_posix()`, então um path Windows tipo `C:\Users\me\.ssh\id_rsa` é corretamente pego pelo pattern default `~/.ssh/`. Confirmado pelo smoke suite nos dois OSes.
+- **Porta 8765 pode ficar reservada no Windows.** Hyper-V, WSL2 e Docker Desktop reservam faixas dinâmicas que às vezes incluem 8765, causando `bind [127.0.0.1]:8765: Permission denied` no lado local de um SSH `-L`. Verifica com `netsh interface ipv4 show excludedportrange protocol=tcp`. Se 8765 estiver reservada, define `GMAIL_MCP_AUTH_PORT` pra uma porta livre nos dois lados (v0.3.3+): `set GMAIL_MCP_AUTH_PORT=18765` no servidor antes de rodar `mcp-gmail-manager-auth`, e encaminha a mesma porta: `ssh -L 18765:localhost:18765 user@server`.
 
 ### Alternativa em qualquer OS — venv manual
 
