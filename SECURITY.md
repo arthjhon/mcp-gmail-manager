@@ -33,7 +33,7 @@ v0.3.0 was externally reviewed by [Haider Ali](https://github.com/shadowhunter-9
 the OWASP Top-10 for Agentic Applications 2026). The review confirmed the primary controls
 close the attack paths they were designed to close, and produced 0 Critical / 0 High / 2 Medium
 / 2 Low findings. **v0.3.1 fixes F1, F2, and F4**; F3 is documented as an accepted-risk policy
-decision (see below). The full report is available on request.
+decision (see below). Full report: [`audits/v0.3.0-external-audit.md`](audits/v0.3.0-external-audit.md).
 
 ## Threat model
 
