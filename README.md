@@ -46,6 +46,8 @@ OAuth scopes requested: `gmail.modify` + `gmail.settings.basic`. Does **not** re
 
 ## Install
 
+> 📖 **Prefer a step-by-step tutorial with screenshots for every stage of the Google Cloud setup?** See the [**Installation Guide**](docs/INSTALLATION.md). The section below covers only the package install; the full guide walks through GCP, credentials, OAuth, VM setup, and Claude Code registration.
+
 Supported on Linux, macOS, and Windows. Recommended path is [pipx](https://pipx.pypa.io/), which installs the CLI into an isolated venv and exposes the entry points on `$PATH`.
 
 ### Linux (Debian / Ubuntu / Mint / Fedora / Arch)
