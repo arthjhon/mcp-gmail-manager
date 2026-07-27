@@ -21,11 +21,13 @@ not disclose publicly until a fix is out.
 
 | Version | Supported |
 |---|---|
-| 0.3.2   | ✅ (Windows path-normalisation fix — recommended for anyone on Windows) |
-| 0.3.1   | ⚠ (functional on Windows but attachment deny list silently no-ops for backslash paths — upgrade to 0.3.2) |
-| 0.3.0   | ⚠ (upgrade to 0.3.2 — closes F1/F2/F4 from the external audit + Windows fix) |
-| 0.2.x   | ⚠ (upgrade to 0.3.2 recommended) |
-| 0.1.x   | ❌ (upgrade to 0.3.2) |
+| 0.3.4   | ✅ (signature auto-append feature) |
+| 0.3.3   | ⚠ (upgrade to 0.3.4 for signature auto-append; otherwise functionally equivalent) |
+| 0.3.2   | ⚠ (missing GMAIL_MCP_AUTH_PORT env var — upgrade to 0.3.4) |
+| 0.3.1   | ⚠ (Windows attachment deny list no-op — upgrade to 0.3.4) |
+| 0.3.0   | ⚠ (upgrade to 0.3.4) |
+| 0.2.x   | ⚠ (upgrade to 0.3.4 recommended) |
+| 0.1.x   | ❌ (upgrade to 0.3.4) |
 
 ## External review
 

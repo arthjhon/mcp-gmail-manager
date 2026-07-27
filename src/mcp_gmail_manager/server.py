@@ -525,6 +525,74 @@ def _cleanup_expired_previews() -> None:
         _pending_previews.pop(k, None)
 
 
+# ---- signature auto-append (v0.3.4) ----
+
+_HTML_BR_RE = re.compile(r"<br\s*/?>|</p>|</div>|</tr>|</h[1-6]>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_ENTITIES = {
+    "&nbsp;": " ", "&amp;": "&", "&lt;": "<", "&gt;": ">",
+    "&quot;": '"', "&#39;": "'", "&apos;": "'",
+}
+_MULTI_BLANK_RE = re.compile(r"\n[ \t]*\n[ \t]*\n+")
+
+_signature_cache: dict[str, tuple[float, str]] = {}
+
+
+def _strip_html_to_text(html: str) -> str:
+    """Convert Gmail's HTML signature to plain text.
+
+    Preserves paragraph/line-break boundaries as newlines and drops other tags.
+    Not a full HTML parser — signatures are simple enough that regex is fine
+    and avoids pulling in a dependency (BeautifulSoup) for one feature.
+    """
+    text = _HTML_BR_RE.sub("\n", html)
+    text = _HTML_TAG_RE.sub("", text)
+    for entity, replacement in _HTML_ENTITIES.items():
+        text = text.replace(entity, replacement)
+    text = _MULTI_BLANK_RE.sub("\n\n", text)
+    return text.strip()
+
+
+def _get_cached_signature() -> str | None:
+    """Return the signature to append, or None if disabled / fetch fails.
+
+    Caches per send_as_email for cache_ttl_seconds so we don't hit the Gmail
+    Settings API on every send. In-memory only — refreshes on process restart.
+    """
+    if not _CFG.signature.auto_append:
+        return None
+    send_as = _CFG.signature.send_as_email or _my_email()
+    now = time.monotonic()
+    cached = _signature_cache.get(send_as)
+    if cached and (now - cached[0] < _CFG.signature.cache_ttl_seconds):
+        return cached[1]
+    try:
+        sa = _gmail_service().users().settings().sendAs().get(
+            userId="me", sendAsEmail=send_as
+        ).execute()
+    except HttpError:
+        return None
+    raw_sig = sa.get("signature") or ""
+    sig = _strip_html_to_text(raw_sig) if _CFG.signature.strip_html else raw_sig
+    _signature_cache[send_as] = (now, sig)
+    return sig or None
+
+
+def _maybe_append_signature(body: str | None) -> str | None:
+    """Append the cached Gmail signature to the body when auto_append is on.
+
+    Uses the RFC 3676 separator (dash-dash-space-newline) so email clients
+    can detect and optionally style the signature block. No-op when the
+    feature is disabled or the fetched signature is empty.
+    """
+    if body is None:
+        return None
+    sig = _get_cached_signature()
+    if not sig:
+        return body
+    return f"{body}\n\n-- \n{sig}"
+
+
 # ============================== send / reply / forward ==============================
 
 def _do_send_email(to, subject, body, cc, bcc, attachments):
@@ -553,6 +621,7 @@ def op_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
             "Direct send_email is disabled by config.send_confirmation.required=true. "
             "Call preview_send_email first, then confirm_send_email with the returned preview_id."
         )
+    body = _maybe_append_signature(body)
     return _do_send_email(to, subject, body, cc, bcc, attachments)
 
 
@@ -562,6 +631,7 @@ def op_preview_send_email(to, subject, body, cc=None, bcc=None, attachments=None
     sends that stored payload, so a compromised LLM cannot "preview X, then
     send Y" — the confirmation always sends what was previewed."""
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
+    body = _maybe_append_signature(body)
     _reject_if_content_matched(
         {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
         "preview",
@@ -606,6 +676,7 @@ def op_confirm_send_email(preview_id: str):
 
 def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
     _check_rate_limit()
+    body = _maybe_append_signature(body)
     _reject_if_content_matched({"body": _scan_content(body, "body")}, "reply")
     svc = _gmail_service()
     orig = svc.users().messages().get(
@@ -648,6 +719,7 @@ def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
 def op_forward_message(message_id, to, body=None, cc=None, bcc=None, attachments=None):
     _check_rate_limit()
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
+    body = _maybe_append_signature(body)
     _reject_if_content_matched({"body": _scan_content(body, "body")}, "forward")
     svc = _gmail_service()
     orig = svc.users().messages().get(userId="me", id=message_id, format="full").execute()
@@ -677,6 +749,7 @@ def op_forward_message(message_id, to, body=None, cc=None, bcc=None, attachments
 def op_create_draft(to=None, subject=None, body=None, cc=None, bcc=None, attachments=None, reply_to_message_id=None):
     if to or cc or bcc:
         _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=False)
+    body = _maybe_append_signature(body)
     _reject_if_content_matched(
         {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
         "create_draft",
@@ -753,6 +826,7 @@ def op_send_draft(draft_id):
 def op_update_draft(draft_id, to=None, subject=None, body=None, cc=None, bcc=None, attachments=None):
     if to or cc or bcc:
         _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=False)
+    body = _maybe_append_signature(body)
     _reject_if_content_matched(
         {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
         "update_draft",

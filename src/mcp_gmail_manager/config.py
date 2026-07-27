@@ -126,6 +126,21 @@ class SendConfirmationConfig:
 
 
 @dataclass
+class SignatureConfig:
+    """Auto-append the Gmail Settings signature to outgoing bodies.
+
+    Gmail only appends the configured signature to messages composed in the web
+    UI — messages sent via the API bypass it. Enabling this makes the MCP fetch
+    the signature from Gmail Settings and append it to every outbound body
+    (send/reply/forward/create_draft/update_draft/preview_send_email).
+    """
+    auto_append: bool = False
+    cache_ttl_seconds: int = 3600
+    strip_html: bool = True
+    send_as_email: str | None = None  # None = use primary (getProfile)
+
+
+@dataclass
 class Config:
     config_dir: Path = field(default_factory=_default_config_dir)
     allowlist: AllowlistConfig = field(default_factory=AllowlistConfig)
@@ -134,6 +149,7 @@ class Config:
     rate_limit: RateLimitConfig = field(default_factory=RateLimitConfig)
     content_scan: ContentScanConfig = field(default_factory=ContentScanConfig)
     send_confirmation: SendConfirmationConfig = field(default_factory=SendConfirmationConfig)
+    signature: SignatureConfig = field(default_factory=SignatureConfig)
 
     @property
     def credentials_path(self) -> Path:
@@ -222,5 +238,13 @@ def load_config() -> Config:
         cfg.send_confirmation = SendConfirmationConfig(
             required=bool(sc.get("required", False)),
             preview_ttl_seconds=int(sc.get("preview_ttl_seconds", SendConfirmationConfig.preview_ttl_seconds)),
+        )
+    if isinstance(data.get("signature"), dict):
+        sg = data["signature"]
+        cfg.signature = SignatureConfig(
+            auto_append=bool(sg.get("auto_append", False)),
+            cache_ttl_seconds=int(sg.get("cache_ttl_seconds", SignatureConfig.cache_ttl_seconds)),
+            strip_html=bool(sg.get("strip_html", True)),
+            send_as_email=(sg.get("send_as_email") or None),
         )
     return cfg

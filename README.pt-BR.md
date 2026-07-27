@@ -292,6 +292,10 @@ Referência de schema:
 | `content_scan.scan_subject` / `scan_body` / `scan_signature` / `scan_vacation` | `true` | Toggles por escopo. Útil pra desligar um local mantendo outros ativos. |
 | `send_confirmation.required` | `false` | Quando `true`, `send_email` direto é desabilitado — precisa passar por `preview_send_email` → `confirm_send_email(preview_id)`. |
 | `send_confirmation.preview_ttl_seconds` | `300` | Quanto tempo um preview fica válido antes de precisar ser reemitido. |
+| `signature.auto_append` | `false` | Quando `true`, busca a assinatura configurada no Gmail Settings e anexa a todo body outbound (send/reply/forward/create_draft/update_draft/preview). O web UI do Gmail aplica assinaturas automaticamente; a Gmail API **não** — ativa isso pra igualar. |
+| `signature.cache_ttl_seconds` | `3600` | Quanto tempo cachear a assinatura buscada em memória antes de re-fetch. |
+| `signature.strip_html` | `true` | Gmail armazena assinaturas em HTML. Quando `true`, o MCP converte pra plain text (preservando quebras de linha) antes de anexar. Use `false` se pretende enviar mensagens com body HTML. |
+| `signature.send_as_email` | `null` | Qual sendAs identity usar a assinatura. `null` = email primário. |
 
 ### Verificando o audit log
 

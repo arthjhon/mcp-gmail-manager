@@ -37,5 +37,11 @@
   "send_confirmation": {
     "required": true,
     "preview_ttl_seconds": 300
+  },
+  "signature": {
+    "auto_append": true,
+    "cache_ttl_seconds": 3600,
+    "strip_html": true,
+    "send_as_email": null
   }
 }
