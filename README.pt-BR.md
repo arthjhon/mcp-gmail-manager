@@ -294,7 +294,7 @@ Referência de schema:
 | `send_confirmation.preview_ttl_seconds` | `300` | Quanto tempo um preview fica válido antes de precisar ser reemitido. |
 | `signature.auto_append` | `false` | Quando `true`, busca a assinatura configurada no Gmail Settings e anexa a todo body outbound (send/reply/forward/create_draft/update_draft/preview). O web UI do Gmail aplica assinaturas automaticamente; a Gmail API **não** — ativa isso pra igualar. |
 | `signature.cache_ttl_seconds` | `3600` | Quanto tempo cachear a assinatura buscada em memória antes de re-fetch. |
-| `signature.strip_html` | `true` | Gmail armazena assinaturas em HTML. Quando `true`, o MCP converte pra plain text (preservando quebras de linha) antes de anexar. Use `false` se pretende enviar mensagens com body HTML. |
+| `signature.strip_html` | `true` | Gmail armazena assinaturas em HTML. Quando `true`, o MCP strippa pra plain text (preservando quebras de linha) e envia mensagem só text/plain. Quando `false` (v0.3.5+), o MCP envia multipart/alternative — parte text/plain com signature stripada, mais parte text/html com signature HTML original preservando logo, cores e layout. Use `false` se tua assinatura Gmail tem logo ou formatação rica que tu quer manter. |
 | `signature.send_as_email` | `null` | Qual sendAs identity usar a assinatura. `null` = email primário. |
 
 ### Verificando o audit log

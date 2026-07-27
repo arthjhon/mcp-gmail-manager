@@ -21,13 +21,14 @@ not disclose publicly until a fix is out.
 
 | Version | Supported |
 |---|---|
-| 0.3.4   | ✅ (signature auto-append feature) |
-| 0.3.3   | ⚠ (upgrade to 0.3.4 for signature auto-append; otherwise functionally equivalent) |
-| 0.3.2   | ⚠ (missing GMAIL_MCP_AUTH_PORT env var — upgrade to 0.3.4) |
-| 0.3.1   | ⚠ (Windows attachment deny list no-op — upgrade to 0.3.4) |
-| 0.3.0   | ⚠ (upgrade to 0.3.4) |
-| 0.2.x   | ⚠ (upgrade to 0.3.4 recommended) |
-| 0.1.x   | ❌ (upgrade to 0.3.4) |
+| 0.3.5   | ✅ (HTML body support — preserves signature logo / rich formatting) |
+| 0.3.4   | ⚠ (upgrade to 0.3.5 for HTML signature support; otherwise functionally equivalent) |
+| 0.3.3   | ⚠ (upgrade to 0.3.5) |
+| 0.3.2   | ⚠ (upgrade to 0.3.5) |
+| 0.3.1   | ⚠ (Windows attachment deny list no-op — upgrade to 0.3.5) |
+| 0.3.0   | ⚠ (upgrade to 0.3.5) |
+| 0.2.x   | ⚠ (upgrade to 0.3.5 recommended) |
+| 0.1.x   | ❌ (upgrade to 0.3.5) |
 
 ## External review
 

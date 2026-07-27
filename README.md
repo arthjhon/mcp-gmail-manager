@@ -297,7 +297,7 @@ Schema reference:
 | `send_confirmation.preview_ttl_seconds` | `300` | How long a preview stays valid before it must be re-issued. |
 | `signature.auto_append` | `false` | When `true`, fetches the signature configured in Gmail Settings and appends it to every outbound body (send/reply/forward/create_draft/update_draft/preview). Gmail's own web UI applies signatures automatically; the Gmail API does NOT — enable this to match. |
 | `signature.cache_ttl_seconds` | `3600` | How long to cache the fetched signature in memory before re-fetching. |
-| `signature.strip_html` | `true` | Gmail stores signatures as HTML. When `true`, the MCP converts to plain text (preserving line breaks) before appending. Set to `false` if you plan to send HTML-body messages. |
+| `signature.strip_html` | `true` | Gmail stores signatures as HTML. When `true`, the MCP strips to plain text (preserving line breaks) and sends a text/plain-only message. When `false` (v0.3.5+), the MCP sends multipart/alternative — a plain-text part with the stripped signature, plus a text/html part with the original HTML signature preserving logo images, colours and layout. Set to `false` if your Gmail signature has a logo or rich formatting you want to keep. |
 | `signature.send_as_email` | `null` | Which sendAs identity's signature to use. `null` = the primary email. |
 
 ### Verifying the audit log

@@ -383,7 +383,13 @@ def _attach_files(msg: EmailMessage, attachments: list[dict]) -> list[str]:
 
 
 def _build_mime(to=None, subject=None, body=None, cc=None, bcc=None, attachments=None,
-                extra_headers: dict | None = None) -> str:
+                extra_headers: dict | None = None, body_html: str | None = None) -> str:
+    """Build a base64url-encoded MIME message.
+
+    When body_html is provided the message becomes multipart/alternative
+    (plain text + HTML). Add attachments after set_content/add_alternative so
+    Python's email module wraps everything in multipart/mixed correctly.
+    """
     msg = EmailMessage()
     if to:
         msg["To"] = ", ".join(to)
@@ -398,6 +404,8 @@ def _build_mime(to=None, subject=None, body=None, cc=None, bcc=None, attachments
             if v:
                 msg[k] = v
     msg.set_content(body or "")
+    if body_html:
+        msg.add_alternative(body_html, subtype="html")
     if attachments:
         _attach_files(msg, attachments)
     return base64.urlsafe_b64encode(msg.as_bytes()).decode()
@@ -535,7 +543,10 @@ _HTML_ENTITIES = {
 }
 _MULTI_BLANK_RE = re.compile(r"\n[ \t]*\n[ \t]*\n+")
 
-_signature_cache: dict[str, tuple[float, str]] = {}
+# Cache: send_as_email -> (timestamp, (raw_html_signature, plain_text_signature))
+# Storing both variants lets us reuse the fetch whether the caller wants a
+# multipart-alternative HTML body or a plain-text-only send.
+_signature_cache: dict[str, tuple[float, tuple[str, str]]] = {}
 
 
 def _strip_html_to_text(html: str) -> str:
@@ -553,11 +564,23 @@ def _strip_html_to_text(html: str) -> str:
     return text.strip()
 
 
-def _get_cached_signature() -> str | None:
-    """Return the signature to append, or None if disabled / fetch fails.
+def _plain_to_html(text: str) -> str:
+    """Wrap a plain-text body in minimal HTML that preserves line breaks.
 
-    Caches per send_as_email for cache_ttl_seconds so we don't hit the Gmail
-    Settings API on every send. In-memory only — refreshes on process restart.
+    Used to build the HTML alternative when we're appending an HTML signature —
+    the user/LLM composes plain text but the sent message needs an HTML part
+    for the signature's rich formatting (logo, colours, layout) to render.
+    """
+    import html as _html_mod
+    escaped = _html_mod.escape(text or "")
+    escaped = escaped.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br>")
+    return f'<div dir="ltr">{escaped}</div>'
+
+
+def _fetch_signature_pair() -> tuple[str, str] | None:
+    """Fetch (html_signature, plain_signature) from Gmail Settings, with caching.
+
+    Returns None if auto_append is disabled or the API call fails.
     """
     if not _CFG.signature.auto_append:
         return None
@@ -572,30 +595,45 @@ def _get_cached_signature() -> str | None:
         ).execute()
     except HttpError:
         return None
-    raw_sig = sa.get("signature") or ""
-    sig = _strip_html_to_text(raw_sig) if _CFG.signature.strip_html else raw_sig
-    _signature_cache[send_as] = (now, sig)
-    return sig or None
+    raw_html = sa.get("signature") or ""
+    plain = _strip_html_to_text(raw_html)
+    _signature_cache[send_as] = (now, (raw_html, plain))
+    return (raw_html, plain)
 
 
-def _maybe_append_signature(body: str | None) -> str | None:
-    """Append the cached Gmail signature to the body when auto_append is on.
+def _maybe_append_signature(body: str | None) -> tuple[str | None, str | None]:
+    """Return (plain_body_with_sig, html_body_with_sig_or_None).
 
-    Uses the RFC 3676 separator (dash-dash-space-newline) so email clients
-    can detect and optionally style the signature block. No-op when the
-    feature is disabled or the fetched signature is empty.
+    - plain_body always non-None if `body` was non-None (RFC 3676 separator).
+    - html_body is None when strip_html=true (plain-text-only mode) — matches
+      v0.3.4 behaviour, safest default.
+    - When strip_html=false, html_body wraps the plain body in minimal HTML,
+      appends the original HTML signature (preserving logo/colours/layout),
+      and callers pass both to `_build_mime` to produce a
+      multipart/alternative message.
     """
     if body is None:
-        return None
-    sig = _get_cached_signature()
-    if not sig:
-        return body
-    return f"{body}\n\n-- \n{sig}"
+        return (None, None)
+    pair = _fetch_signature_pair()
+    if not pair:
+        return (body, None)
+    sig_html, sig_plain = pair
+    if not sig_plain:
+        return (body, None)
+    plain_body = f"{body}\n\n-- \n{sig_plain}"
+    if _CFG.signature.strip_html:
+        return (plain_body, None)
+    html_body = (
+        f"{_plain_to_html(body)}"
+        f'<br><br><div class="gmail_signature_separator">-- </div>'
+        f'<div class="gmail_signature" dir="ltr">{sig_html}</div>'
+    )
+    return (plain_body, html_body)
 
 
 # ============================== send / reply / forward ==============================
 
-def _do_send_email(to, subject, body, cc, bcc, attachments):
+def _do_send_email(to, subject, body, cc, bcc, attachments, body_html=None):
     """Shared send path used by both direct send_email and confirm_send_email."""
     _check_rate_limit()
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
@@ -603,7 +641,8 @@ def _do_send_email(to, subject, body, cc, bcc, attachments):
         {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
         "send",
     )
-    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
+    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc,
+                     attachments=attachments, body_html=body_html)
     result = _gmail_service().users().messages().send(userId="me", body={"raw": raw}).execute()
     msg_id = result.get("id")
     _audit_log(
@@ -611,6 +650,7 @@ def _do_send_email(to, subject, body, cc, bcc, attachments):
         to=to, cc=cc or [], bcc=bcc or [],
         subject=subject, message_id=msg_id,
         attachments=[Path(a["path"]).name for a in (attachments or [])],
+        html=bool(body_html),
     )
     return {"message_id": msg_id, "thread_id": result.get("threadId")}
 
@@ -621,8 +661,8 @@ def op_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
             "Direct send_email is disabled by config.send_confirmation.required=true. "
             "Call preview_send_email first, then confirm_send_email with the returned preview_id."
         )
-    body = _maybe_append_signature(body)
-    return _do_send_email(to, subject, body, cc, bcc, attachments)
+    body, body_html = _maybe_append_signature(body)
+    return _do_send_email(to, subject, body, cc, bcc, attachments, body_html=body_html)
 
 
 def op_preview_send_email(to, subject, body, cc=None, bcc=None, attachments=None):
@@ -631,7 +671,7 @@ def op_preview_send_email(to, subject, body, cc=None, bcc=None, attachments=None
     sends that stored payload, so a compromised LLM cannot "preview X, then
     send Y" — the confirmation always sends what was previewed."""
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
-    body = _maybe_append_signature(body)
+    body, body_html = _maybe_append_signature(body)
     _reject_if_content_matched(
         {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
         "preview",
@@ -644,6 +684,7 @@ def op_preview_send_email(to, subject, body, cc=None, bcc=None, attachments=None
             "to": list(to), "subject": subject, "body": body,
             "cc": list(cc or []), "bcc": list(bcc or []),
             "attachments": list(attachments or []),
+            "body_html": body_html,
         },
     }
     body_str = body or ""
@@ -671,12 +712,13 @@ def op_confirm_send_email(preview_id: str):
     return _do_send_email(
         args["to"], args["subject"], args["body"],
         args["cc"], args["bcc"], args["attachments"],
+        body_html=args.get("body_html"),
     )
 
 
 def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
     _check_rate_limit()
-    body = _maybe_append_signature(body)
+    body, body_html = _maybe_append_signature(body)
     _reject_if_content_matched({"body": _scan_content(body, "body")}, "reply")
     svc = _gmail_service()
     orig = svc.users().messages().get(
@@ -706,6 +748,7 @@ def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
     raw = _build_mime(
         to=new_to, cc=new_cc, subject=new_subject, body=body, attachments=attachments,
         extra_headers={"In-Reply-To": orig_msg_id, "References": references},
+        body_html=body_html,
     )
     result = svc.users().messages().send(
         userId="me", body={"raw": raw, "threadId": orig.get("threadId")}
@@ -719,7 +762,10 @@ def op_reply_to_message(message_id, body, attachments=None, reply_all=False):
 def op_forward_message(message_id, to, body=None, cc=None, bcc=None, attachments=None):
     _check_rate_limit()
     _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=True)
-    body = _maybe_append_signature(body)
+    # Forward always stays plain-text-only: the quoted forwarded_block below is
+    # plain, so mixing an HTML alternative would require converting the quoted
+    # message too. Use only the plain-text signature here; body_html is dropped.
+    body, _ = _maybe_append_signature(body)
     _reject_if_content_matched({"body": _scan_content(body, "body")}, "forward")
     svc = _gmail_service()
     orig = svc.users().messages().get(userId="me", id=message_id, format="full").execute()
@@ -749,12 +795,13 @@ def op_forward_message(message_id, to, body=None, cc=None, bcc=None, attachments
 def op_create_draft(to=None, subject=None, body=None, cc=None, bcc=None, attachments=None, reply_to_message_id=None):
     if to or cc or bcc:
         _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=False)
-    body = _maybe_append_signature(body)
+    body, body_html = _maybe_append_signature(body)
     _reject_if_content_matched(
         {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
         "create_draft",
     )
-    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
+    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc,
+                     attachments=attachments, body_html=body_html)
     draft_body: dict = {"message": {"raw": raw}}
     if reply_to_message_id:
         orig = _gmail_service().users().messages().get(
@@ -826,12 +873,13 @@ def op_send_draft(draft_id):
 def op_update_draft(draft_id, to=None, subject=None, body=None, cc=None, bcc=None, attachments=None):
     if to or cc or bcc:
         _check_all_recipients(to=to, cc=cc, bcc=bcc, require_at_least_one=False)
-    body = _maybe_append_signature(body)
+    body, body_html = _maybe_append_signature(body)
     _reject_if_content_matched(
         {"body": _scan_content(body, "body"), "subject": _scan_content(subject, "subject")},
         "update_draft",
     )
-    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc, attachments=attachments)
+    raw = _build_mime(to=to, subject=subject, body=body, cc=cc, bcc=bcc,
+                     attachments=attachments, body_html=body_html)
     result = _gmail_service().users().drafts().update(
         userId="me", id=draft_id, body={"message": {"raw": raw}}
     ).execute()
