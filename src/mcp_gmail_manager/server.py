@@ -26,13 +26,12 @@ from email.message import EmailMessage
 from pathlib import Path
 from typing import Any
 
+import mcp.server.stdio
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-
-import mcp.server.stdio
-import mcp.types as types
+from mcp import types
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 
@@ -1115,7 +1114,7 @@ def op_list_filters():
 
 def op_create_filter(criteria, action):
     if not isinstance(criteria, dict) or not isinstance(action, dict):
-        raise ValueError("criteria e action devem ser objetos.")
+        raise TypeError("criteria e action devem ser objetos.")
     forward_addr = action.get("forward")
     if forward_addr:
         # A filter with a forward action is functionally equivalent to send_email
