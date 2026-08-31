@@ -43,5 +43,8 @@
     "cache_ttl_seconds": 3600,
     "strip_html": true,
     "send_as_email": null
+  },
+  "body": {
+    "format": "markdown"
   }
 }

@@ -576,6 +576,47 @@ def _plain_to_html(text: str) -> str:
     return f'<div dir="ltr">{escaped}</div>'
 
 
+def _render_markdown_to_html(text: str) -> str:
+    """Render a Markdown body to HTML for use in the text/html alternative.
+
+    Uses the ``markdown`` library with the ``nl2br`` extension so single
+    newlines become <br>, matching how users write emails (line breaks are
+    visible, not silently collapsed as in strict CommonMark).
+    """
+    try:
+        import markdown as _md_mod  # local import to keep import time low
+    except ImportError:
+        # Graceful degrade — if markdown lib is not installed for some reason,
+        # fall back to the plain-text conversion.
+        return _plain_to_html(text)
+    html = _md_mod.markdown(text or "", extensions=["extra", "nl2br", "sane_lists"])
+    return f'<div dir="ltr">{html}</div>'
+
+
+def _body_forms(body: str) -> tuple[str, str | None]:
+    """Return (plain_form, html_form_or_None) based on config.body.format.
+
+    - plain: (body, None) — no HTML derived from body alone.
+    - markdown: (body_raw_markdown, rendered_html).
+    - html: (stripped_to_text, body_as_html).
+    """
+    fmt = _CFG.body.normalized()
+    if fmt == "html":
+        return (_strip_html_to_text(body), body)
+    if fmt == "markdown":
+        return (body, _render_markdown_to_html(body))
+    return (body, None)
+
+
+def _sig_plain_as_html(sig_plain: str) -> str:
+    """Wrap a plain-text signature in minimal HTML for the html alternative
+    when the user opted into signature.strip_html=true but the message still
+    needs an HTML part (because body.format is markdown/html)."""
+    import html as _html_mod
+    escaped = _html_mod.escape(sig_plain).replace("\n", "<br>")
+    return f'<div dir="ltr">{escaped}</div>'
+
+
 def _fetch_signature_pair() -> tuple[str, str] | None:
     """Fetch (html_signature, plain_signature) from Gmail Settings, with caching.
 
@@ -603,31 +644,51 @@ def _fetch_signature_pair() -> tuple[str, str] | None:
 def _maybe_append_signature(body: str | None) -> tuple[str | None, str | None]:
     """Return (plain_body_with_sig, html_body_with_sig_or_None).
 
-    - plain_body always non-None if `body` was non-None (RFC 3676 separator).
-    - html_body is None when strip_html=true (plain-text-only mode) — matches
-      v0.3.4 behaviour, safest default.
-    - When strip_html=false, html_body wraps the plain body in minimal HTML,
-      appends the original HTML signature (preserving logo/colours/layout),
-      and callers pass both to `_build_mime` to produce a
-      multipart/alternative message.
+    Behaviour depends on two config knobs:
+
+    - ``body.format`` = plain (default) / markdown / html — determines whether
+      the message needs an HTML alternative because the body is Markdown or
+      raw HTML that should render rich.
+    - ``signature.auto_append`` + ``signature.strip_html`` — whether to fetch
+      the Gmail Settings signature and how to render it.
+
+    When neither the body nor the signature requires HTML, returns
+    (plain_body_with_sig, None) and callers send text/plain only. Otherwise
+    returns (plain_body_with_sig, html_body_with_sig) and callers produce a
+    multipart/alternative message.
     """
     if body is None:
         return (None, None)
+
+    plain_body, html_body = _body_forms(body)
+
     pair = _fetch_signature_pair()
     if not pair:
-        return (body, None)
+        # No signature to append. Still return the html_body if body.format
+        # produced one (markdown/html mode).
+        return (plain_body, html_body)
     sig_html, sig_plain = pair
     if not sig_plain:
-        return (body, None)
-    plain_body = f"{body}\n\n-- \n{sig_plain}"
-    if _CFG.signature.strip_html:
-        return (plain_body, None)
-    html_body = (
-        f"{_plain_to_html(body)}"
+        return (plain_body, html_body)
+
+    # Plain part always gets the plain-text signature via RFC 3676 separator.
+    plain_with_sig = f"{plain_body}\n\n-- \n{sig_plain}"
+
+    need_html = (html_body is not None) or (not _CFG.signature.strip_html)
+    if not need_html:
+        return (plain_with_sig, None)
+
+    if html_body is None:
+        html_body = _plain_to_html(body)
+
+    sig_html_final = sig_html if not _CFG.signature.strip_html else _sig_plain_as_html(sig_plain)
+
+    html_with_sig = (
+        f"{html_body}"
         f'<br><br><div class="gmail_signature_separator">-- </div>'
-        f'<div class="gmail_signature" dir="ltr">{sig_html}</div>'
+        f'<div class="gmail_signature" dir="ltr">{sig_html_final}</div>'
     )
-    return (plain_body, html_body)
+    return (plain_with_sig, html_with_sig)
 
 
 # ============================== send / reply / forward ==============================

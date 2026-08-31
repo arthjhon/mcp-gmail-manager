@@ -126,6 +126,25 @@ class SendConfirmationConfig:
 
 
 @dataclass
+class BodyConfig:
+    """Controls how the ``body`` field of send_email/reply/draft/etc. is
+    interpreted and rendered.
+
+    - ``plain`` (default): body is plain text; MIME is text/plain only unless
+      signature.strip_html=false forces multipart/alternative.
+    - ``markdown``: body is Markdown. text/plain part keeps the raw Markdown
+      (readable as-is); text/html part is the rendered HTML.
+    - ``html``: body is HTML. text/html part is the raw body; text/plain part
+      is the body stripped to plain text.
+    """
+    format: str = "plain"
+
+    def normalized(self) -> str:
+        f = (self.format or "plain").lower()
+        return f if f in ("plain", "markdown", "html") else "plain"
+
+
+@dataclass
 class SignatureConfig:
     """Auto-append the Gmail Settings signature to outgoing bodies.
 
@@ -150,6 +169,7 @@ class Config:
     content_scan: ContentScanConfig = field(default_factory=ContentScanConfig)
     send_confirmation: SendConfirmationConfig = field(default_factory=SendConfirmationConfig)
     signature: SignatureConfig = field(default_factory=SignatureConfig)
+    body: BodyConfig = field(default_factory=BodyConfig)
 
     @property
     def credentials_path(self) -> Path:
@@ -247,4 +267,7 @@ def load_config() -> Config:
             strip_html=bool(sg.get("strip_html", True)),
             send_as_email=(sg.get("send_as_email") or None),
         )
+    if isinstance(data.get("body"), dict):
+        bd = data["body"]
+        cfg.body = BodyConfig(format=str(bd.get("format", "plain")))
     return cfg
