@@ -21,15 +21,16 @@ not disclose publicly until a fix is out.
 
 | Version | Supported |
 |---|---|
-| 0.3.6   | ✅ (body.format = plain/markdown/html — Markdown auto-renders to rich HTML) |
-| 0.3.5   | ⚠ (upgrade to 0.3.6 to gain Markdown rendering; HTML signature still works either way) |
-| 0.3.4   | ⚠ (upgrade to 0.3.6) |
-| 0.3.3   | ⚠ (upgrade to 0.3.6) |
-| 0.3.2   | ⚠ (upgrade to 0.3.6) |
-| 0.3.1   | ⚠ (Windows attachment deny list no-op — upgrade to 0.3.6) |
-| 0.3.0   | ⚠ (upgrade to 0.3.6) |
-| 0.2.x   | ⚠ (upgrade to 0.3.6 recommended) |
-| 0.1.x   | ❌ (upgrade to 0.3.6) |
+| 0.3.7   | ✅ (fixes `list_drafts` TypeError — invalid `metadataHeaders` kwarg removed from `drafts().get()`) |
+| 0.3.6   | ⚠ (upgrade to 0.3.7 — `list_drafts` raises TypeError, hides all drafts) |
+| 0.3.5   | ⚠ (upgrade to 0.3.7 to gain Markdown rendering + list_drafts fix) |
+| 0.3.4   | ⚠ (upgrade to 0.3.7) |
+| 0.3.3   | ⚠ (upgrade to 0.3.7) |
+| 0.3.2   | ⚠ (upgrade to 0.3.7) |
+| 0.3.1   | ⚠ (Windows attachment deny list no-op — upgrade to 0.3.7) |
+| 0.3.0   | ⚠ (upgrade to 0.3.7) |
+| 0.2.x   | ⚠ (upgrade to 0.3.7 recommended) |
+| 0.1.x   | ❌ (upgrade to 0.3.7) |
 
 ## External review
 

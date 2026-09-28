@@ -886,7 +886,6 @@ def op_list_drafts(query=None, page_size=20, page_token=None):
         try:
             full = svc.users().drafts().get(
                 userId="me", id=d["id"], format="metadata",
-                metadataHeaders=["Subject", "To"],
             ).execute()
             msg = full.get("message") or {}
             headers = _headers_map(msg.get("payload"))
@@ -897,7 +896,7 @@ def op_list_drafts(query=None, page_size=20, page_token=None):
                 "to": _wrap_untrusted(headers.get("To")),
                 "snippet": _wrap_untrusted(msg.get("snippet")),
             })
-        except HttpError:
+        except (HttpError, TypeError, KeyError):
             drafts.append({"draft_id": d["id"]})
     return {"drafts": drafts, "next_page_token": resp.get("nextPageToken")}
 
